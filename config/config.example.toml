@@ -1,0 +1,59 @@
+# Проект конфигурации. Поддержка полей реализуется по этапам ROADMAP.md.
+# Все аккаунты и идентификаторы расписания в этом файле вымышлены.
+config_version = 1
+timezone = "Europe/Moscow"
+data_dir = "/var/lib/goose-xmpp-bot"
+
+[xmpp]
+jid = "goose-test@example.org"
+resource = "goose-bot"
+password_env = "GOOSE_XMPP_PASSWORD"
+# Использовать DNS/SRV и проверку сертификата для домена JID.
+require_tls = true
+omemo = "required"
+
+[access]
+admin_jids = ["parent@example.org"]
+allowed_jids = ["parent@example.org", "pupil1@example.org", "pupil2@example.org"]
+
+[runtime]
+default_mode = "manual"
+log_level = "INFO"
+
+[diagnostics]
+echo_enabled = false
+
+[llm]
+enabled = false
+provider = "openai_compatible"
+base_url = ""
+model = ""
+api_key_env = "GOOSE_LLM_API_KEY"
+timeout_seconds = 30
+max_output_tokens = 700
+max_concurrent_requests = 2
+
+[memory]
+recent_messages = 24
+context_token_budget = 6000
+retention_days = 30
+
+[schedule]
+enabled = false
+# Будущий машиночитаемый источник. URL действующего API не подтверждён.
+source_url = ""
+timeout_seconds = 10
+
+# Начальные значения для новых профилей. После создания актуальные
+# профили хранятся в SQLite; перезапуск не сбрасывает изменения владельца.
+[users."pupil1@example.org"]
+grade = 2
+academic_year = "2026-2027"
+schedule_class_id = "cohort-example-1"
+explanation_style = "short_step_by_step"
+
+[users."pupil2@example.org"]
+grade = 7
+academic_year = "2026-2027"
+schedule_class_id = "cohort-example-2"
+explanation_style = "step_by_step_with_reasoning"
