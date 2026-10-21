@@ -3,8 +3,10 @@
 import asyncio
 from contextlib import suppress
 import hmac
+import re
 import sys
 
+from omemo.session_manager import TrustDecisionFailed
 from slixmpp.plugins import register_plugin
 from slixmpp_omemo import TrustLevel, XEP_0384
 
@@ -13,7 +15,7 @@ from .config import ConfigError
 LEGACY_NS = "eu.siacs.conversations.axolotl"
 
 
-class ManualTrustRequired(Exception):
+class ManualTrustRequired(TrustDecisionFailed):
     pass
 
 
@@ -80,7 +82,8 @@ async def set_verified_trust(manager, jid, device_id, expected, distrust=False):
     devices = await manager.get_device_information(jid)
     selected = next((d for d in devices if d.device_id == device_id), None)
     expected = expected.replace(" ", "").lower()
-    if selected is None or not hmac.compare_digest(fingerprint(manager, selected), expected):
+    if (selected is None or not re.fullmatch(r"[0-9a-f]{64}", expected)
+            or not hmac.compare_digest(fingerprint(manager, selected), expected)):
         raise ConfigError("Устройство не найдено или отпечаток не совпадает; доверие не изменено.")
     await manager.set_trust(jid, selected.identity_key,
                             TrustLevel.DISTRUSTED.value if distrust else TrustLevel.TRUSTED.value)

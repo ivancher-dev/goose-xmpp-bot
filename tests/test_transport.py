@@ -11,7 +11,7 @@ from slixmpp import Message
 from goose.cli import configure_logging, doctor, main
 from goose.config import ConfigError
 from goose.omemo import LEGACY_NS, GooseOmemo, ManualTrustRequired
-from goose.transport import GooseClient, classify, run_sessions
+from goose.transport import GooseClient, classify, delivery_key, run_sessions
 
 
 def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1", kind="chat"):
@@ -35,6 +35,24 @@ def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1
 ])
 def test_envelopes_not_commands(sender, extra, kind, reason, config):
     assert classify(message(sender, extra=extra, kind=kind), config.jid) == reason
+
+
+def test_delivery_id_scoped_by_sender_and_origin_id():
+    first = message(extra='<origin-id xmlns="urn:xmpp:sid:0" id="origin1"/>', id="different1")
+    second = message(extra='<origin-id xmlns="urn:xmpp:sid:0" id="origin1"/>', id="different2")
+    assert delivery_key(first) == delivery_key(second)
+    assert delivery_key(message(sender="pupil1@example.org")) != delivery_key(message())
+    assert delivery_key(message(id=""))[1] == 60
+    assert delivery_key(message())[1] == 7 * 86400
+
+
+async def test_reconnect_delegates_to_controller(config):
+    client = GooseClient(config, "test-only", probe=True)
+    client.connect = Mock()
+    client.reconnect()
+    assert client.ended.is_set()
+    client.connect.assert_not_called()
+    await client.close()
 
 
 @pytest.fixture
@@ -155,6 +173,29 @@ async def test_retries_bounded_and_close_each_client(config, monkeypatch):
         await run_sessions(config, None, asyncio.Event(), client_factory=FailingClient)
     assert len(clients) == config.max_attempts
     assert all(c.close.await_count == 1 for c in clients)
+
+
+async def test_auth_failure_not_retried(config, monkeypatch):
+    monkeypatch.setenv(config.password_env, "test-only")
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), fatal=True, close=AsyncMock())
+    client.connect = lambda: client.ended.set()
+    factory = Mock(return_value=client)
+    with pytest.raises(ConfigError, match="авторизации"):
+        await run_sessions(config, None, asyncio.Event(), client_factory=factory)
+    factory.assert_called_once()
+    client.close.assert_awaited_once()
+
+
+async def test_stop_closes_running_session(config, monkeypatch):
+    monkeypatch.setenv(config.password_env, "test-only")
+    stop = asyncio.Event()
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), fatal=False, close=AsyncMock())
+    def connected():
+        client.ready.set()
+        asyncio.get_running_loop().call_later(0.01, stop.set)
+    client.connect = connected
+    await run_sessions(config, None, stop, client_factory=Mock(return_value=client))
+    client.close.assert_awaited_once()
 
 
 def test_local_doctor_does_not_create_identity(config, capsys):

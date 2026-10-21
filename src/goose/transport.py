@@ -14,7 +14,7 @@ from slixmpp.xmlstream.matcher import MatchXPath
 
 from .commands import Commands
 from .config import ConfigError, bare_jid
-from .omemo import LEGACY_NS, register
+from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
 
 log = logging.getLogger("goose")
@@ -69,6 +69,7 @@ class GooseClient(ClientXMPP):
         self.ended = asyncio.Event()
         self.failed = False
         self.fatal = False
+        self.failure_reason = None
         self.manager = None
         self.start_task = None
         self.features = {"carbons": "не проверено", "mam": "не проверено"}
@@ -97,8 +98,15 @@ class GooseClient(ClientXMPP):
         self.ended.set()
         return None
 
+    def reconnect(self, wait=2, reason="Reconnecting"):
+        # В том числе see-other-host: новая сессия создаётся контроллером с исходным
+        # доменом TLS и лимитом попыток, а не скрытым reconnect библиотеки.
+        self.failed = True
+        self.ended.set()
+
     def on_auth_failure(self, _):
         self.failed = self.fatal = True
+        self.failure_reason = "Ошибка авторизации XMPP; проверьте учётную запись."
         log.error("xmpp_auth_failed")
         self.cancel_connection_attempt()
         self.ended.set()
@@ -108,7 +116,8 @@ class GooseClient(ClientXMPP):
         self.ended.set()
 
     def on_initialization_failure(self, _):
-        self.failed = True
+        self.failed = self.fatal = True
+        self.failure_reason = "Не удалось инициализировать OMEMO; проверьте PEP, сеть и хранилище."
         log.error("omemo_initialization_failed")
         self.ended.set()
 
@@ -126,7 +135,13 @@ class GooseClient(ClientXMPP):
             if self.features["carbons"]:
                 await self.plugin["xep_0280"].enable(timeout=10)
             if not self.probe:
-                self.manager = await self.plugin["xep_0384"].get_session_manager()
+                try:
+                    self.manager = await self.plugin["xep_0384"].get_session_manager()
+                except Exception:
+                    # Ошибка библиотеки после частичной инициализации завершается
+                    # выходом процесса: asyncio.run отменит и её внутренние задачи.
+                    self.on_initialization_failure(None)
+                    raise
                 self.worker = asyncio.create_task(self.process_queue())
             self.ready.set()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
@@ -202,6 +217,8 @@ class GooseClient(ClientXMPP):
             encrypted["eme"]["name"] = "OMEMO"
             if self.ready.is_set():
                 encrypted.send()
+        except ManualTrustRequired:
+            log.warning("reply_blocked reason=manual_trust_required")
         except Exception:
             log.warning("reply_blocked reason=omemo_or_command_failure")
 
@@ -252,7 +269,8 @@ async def run_sessions(config, database, stop, action=None, *, probe=False, clie
             if stop.is_set():
                 return
             if client.fatal:
-                raise ConfigError("Ошибка авторизации XMPP; проверьте учётную запись.")
+                raise ConfigError(getattr(client, "failure_reason", None)
+                                  or "Ошибка авторизации XMPP; проверьте учётную запись.")
         finally:
             await client.close()
         if attempt + 1 < config.max_attempts:

@@ -1,4 +1,6 @@
+import asyncio
 from dataclasses import replace
+import threading
 
 import pytest
 
@@ -59,6 +61,24 @@ async def test_dedup_persists(config, database):
     assert not await Database(config.data_dir, config.jid).claim("one", 60)
     assert await database.claim("two", -1)
     assert await database.claim("two", 60)
+
+
+async def test_cancellation_waits_for_database_commit(database):
+    started, finish = threading.Event(), threading.Event()
+    def operation(db):
+        started.set()
+        assert finish.wait(2)
+        db.execute("INSERT INTO metadata VALUES ('cancellation-test', 'committed')")
+    task = asyncio.create_task(database.call(operation))
+    await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert database.lock.locked()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = await database.call(lambda db: db.execute("SELECT value FROM metadata WHERE key='cancellation-test'").fetchone())
+    assert row[0] == "committed"
 
 
 async def test_commands_and_authorization(config, database):
