@@ -1,0 +1,4 @@
+# Runtime и backend сборки; версии runtime согласованы с pyproject.toml.
+slixmpp==1.17.0
+slixmpp-omemo==2.2.0
+setuptools==80.9.0

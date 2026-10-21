@@ -1,4 +1,4 @@
-# Проект конфигурации. Поддержка полей реализуется по этапам ROADMAP.md.
+# Конфигурация этапа 1. LLM, memory и schedule — проверяемые неактивные настройки.
 # Все аккаунты и идентификаторы расписания в этом файле вымышлены.
 config_version = 1
 timezone = "Europe/Moscow"
@@ -19,6 +19,8 @@ allowed_jids = ["parent@example.org", "pupil1@example.org", "pupil2@example.org"
 [runtime]
 default_mode = "manual"
 log_level = "INFO"
+max_attempts = 3
+connect_timeout = 45
 
 [diagnostics]
 echo_enabled = false
