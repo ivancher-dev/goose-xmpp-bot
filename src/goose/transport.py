@@ -10,6 +10,7 @@ import ssl
 import xml.etree.ElementTree as ET
 
 from slixmpp import ClientXMPP, JID, Message
+from slixmpp.exceptions import IqError, IqTimeout
 from slixmpp.xmlstream.handler import Callback
 from slixmpp.xmlstream.matcher import MatchXPath
 
@@ -172,7 +173,17 @@ class GooseClient(ClientXMPP):
             self.send_presence(ppriority=0 if self.serving_commands else -1)
             info = await self.plugin["xep_0030"].get_info(jid=self.boundjid.domain, timeout=10)
             supported = set(info["disco_info"]["features"])
-            self.features = {"carbons": CARBONS in supported, "mam": MAM in supported}
+            self.features = {"carbons": CARBONS in supported, "mam": "не проверено"}
+            try:
+                # Архив пользователя объявляется на bare JID аккаунта, отдельно
+                # от возможностей домена. Требуется свежий сетевой disco#info.
+                account_info = await self.plugin["xep_0030"].get_info(
+                    jid=self.boundjid.bare, local=False, cached=False, timeout=10)
+            except (IqError, IqTimeout):
+                # Отказ/таймаут не доказывает отсутствие MAM и не запрещает чат.
+                log.warning("xmpp_discovery_incomplete feature=mam")
+            else:
+                self.features["mam"] = MAM in account_info["disco_info"]["features"]
             if self.features["carbons"]:
                 await self.plugin["xep_0280"].enable(timeout=10)
             if not self.probe:

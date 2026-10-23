@@ -55,6 +55,8 @@ sudo journalctl -u goose-xmpp-bot.service -n 30 --no-pager
 
 Только явный `--xmpp` подключается к тестовому аккаунту. У него случайный отдельный resource `doctor-*`; OMEMO-плагин не загружается, новая идентичность не создаётся, решения доверия не меняются. Диагностика проверяет авторизацию, TLS, roster и discovery Carbons/MAM, затем закрывает соединение. Это не проверка шифрования с клиентами.
 
+Carbons запрашиваются у домена, поддержка MAM 2 — отдельным сетевым `disco#info` у bare JID аккаунта. `MAM=True` означает объявленную поддержку, `False` — отсутствие `urn:xmpp:mam:2` в корректном ответе аккаунта. При IQ-ошибке или таймауте остаётся «не проверено», в журнал выводится `xmpp_discovery_incomplete feature=mam`; эта необязательная проверка не препятствует запуску чата. Таймаут запроса — 10 секунд. Содержимое архива эта диагностика не запрашивает.
+
 ```bash
 sudo systemd-run --pipe --wait --collect --uid=goose-xmpp-bot \
   --property=EnvironmentFile=/etc/goose-xmpp-bot/goose.env \

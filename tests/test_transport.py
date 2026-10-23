@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, Mock
 import xml.etree.ElementTree as ET
 
 import pytest
-from slixmpp import Message
+from slixmpp import Iq, JID, Message
+from slixmpp.exceptions import IqError, IqTimeout
 
 from goose.cli import configure_logging, doctor, main
 from goose.config import ConfigError
 from goose.omemo import LEGACY_NS, GooseOmemo, ManualTrustRequired
-from goose.transport import CARBONS, DELAY, FORWARD, GooseClient, classify, delivery_key, incoming_stanza, run_sessions
+from goose.transport import CARBONS, DELAY, FORWARD, MAM, GooseClient, classify, delivery_key, incoming_stanza, run_sessions
 
 
 def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1", kind="chat"):
@@ -276,6 +277,74 @@ async def test_management_action_never_starts_command_service(config, monkeypatc
     assert factory.call_args.kwargs["maintenance"] is True
     action.assert_awaited_once_with(client)
     client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("domain_features,account_features,carbons,mam", [
+    ([CARBONS], [MAM], True, True),
+    ([CARBONS, MAM], [], True, False),
+    ([], [MAM], False, True),
+    ([], [], False, False),
+])
+async def test_mam_discovery_uses_account_not_domain(config, monkeypatch, domain_features, account_features, carbons, mam):
+    client = GooseClient(config, "test-only", probe=True)
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    async def info(*, jid, **kwargs):
+        if jid == config.jid:
+            assert kwargs["local"] is False
+            assert kwargs["cached"] is False
+            return {"disco_info": {"features": account_features}}
+        assert jid == JID(config.jid).domain
+        return {"disco_info": {"features": domain_features}}
+    disco = AsyncMock(side_effect=info)
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info", disco)
+    enable = AsyncMock()
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", enable)
+    try:
+        await client.on_start(None)
+        assert client.ready.is_set()
+        assert client.features == {"carbons": carbons, "mam": mam}
+        assert enable.await_count == int(carbons)
+        assert disco.await_count == 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("failure", [IqError, IqTimeout, asyncio.CancelledError])
+async def test_mam_discovery_failure_is_unknown_and_cancellation_propagates(config, monkeypatch, failure):
+    from goose import transport
+    client = GooseClient(config, "test-only", probe=True)
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    iq = Iq()
+    iq["error"]["condition"] = "forbidden"
+    iq["error"]["text"] = "private-diagnostic-must-not-be-logged"
+    error = failure() if failure is asyncio.CancelledError else failure(iq)
+    disco = AsyncMock(side_effect=[{"disco_info": {"features": [CARBONS, MAM]}}, error])
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info", disco)
+    enable = AsyncMock()
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", enable)
+    warning = Mock()
+    monkeypatch.setattr(transport.log, "warning", warning)
+    try:
+        if failure is asyncio.CancelledError:
+            with pytest.raises(asyncio.CancelledError):
+                await client.on_start(None)
+            assert not client.ready.is_set()
+            warning.assert_not_called()
+        else:
+            await client.on_start(None)
+            assert client.ready.is_set()
+            assert not client.failed
+            assert "MAM=не проверено" in client.status()
+            enable.assert_awaited_once_with(timeout=10)
+            warning.assert_called_once_with("xmpp_discovery_incomplete feature=mam")
+        assert client.features == {"carbons": True, "mam": "не проверено"}
+        assert disco.await_count == 2
+    finally:
+        await client.close()
 
 
 async def test_tls_and_probe_has_no_omemo_or_database(config):
