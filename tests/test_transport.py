@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, Mock
 import xml.etree.ElementTree as ET
 
 import pytest
-from slixmpp import Message
+from slixmpp import Iq, JID, Message
+from slixmpp.exceptions import IqError, IqTimeout
 
 from goose.cli import configure_logging, doctor, main
 from goose.config import ConfigError
 from goose.omemo import LEGACY_NS, GooseOmemo, ManualTrustRequired
-from goose.transport import GooseClient, classify, delivery_key, run_sessions
+from goose.transport import CARBONS, DELAY, FORWARD, MAM, GooseClient, classify, delivery_key, incoming_stanza, run_sessions
 
 
 def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1", kind="chat"):
@@ -35,6 +36,112 @@ def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1
 ])
 def test_envelopes_not_commands(sender, extra, kind, reason, config):
     assert classify(message(sender, extra=extra, kind=kind), config.jid) == reason
+
+
+def test_received_carbon_preserves_original_identity_and_ciphertext(config, carbon_message):
+    original = message(extra=f'<encrypted xmlns="{LEGACY_NS}"><header sid="42"/></encrypted>')
+    carbon = carbon_message(original)
+    inner, source = incoming_stanza(carbon, config.jid)
+    assert source == "received-carbon"
+    assert str(inner["from"]) == str(original["from"])
+    assert str(inner["to"]) == str(original["to"])
+    assert inner["id"] == original["id"]
+    assert ET.tostring(inner.xml) == ET.tostring(original.xml)
+    # Расшифровка не должна менять XML внешней оболочки.
+    inner["body"] = "changed"
+    assert carbon.xml.find(f".//{{jabber:client}}body").text == "!ping"
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("foreign-sender", "invalid-carbon"),
+    ("own-full-sender", "invalid-carbon"),
+    ("missing-sender", "invalid-sender"),
+    ("foreign-recipient", "invalid-carbon"),
+    ("missing-recipient", "invalid-carbon"),
+    ("foreign-inner-recipient", "invalid-carbon"),
+    ("missing-inner-recipient", "invalid-carbon"),
+    ("missing-inner-sender", "invalid-sender"),
+    ("own-inner-sender", "own"),
+    ("error-outer", "invalid-carbon"),
+    ("error-inner", "service"),
+    ("receipt-inner", "receipt"),
+    ("sent", "sent-carbon"),
+    ("mixed", "invalid-carbon"),
+    ("duplicate-received", "invalid-carbon"),
+    ("empty-carbon", "invalid-carbon"),
+    ("empty-forwarded", "invalid-carbon"),
+    ("duplicate-forwarded", "invalid-carbon"),
+    ("duplicate-inner", "invalid-carbon"),
+    ("iq-inner", "invalid-carbon"),
+    ("nested-carbon", "carbon"),
+    ("nested-forwarded", "forwarded"),
+    ("mam", "archive"),
+    ("delay-outer", "delayed"),
+    ("delay-forwarded", "delayed"),
+    ("delay-inner", "delayed"),
+    ("legacy-delay", "delayed"),
+])
+def test_carbon_cannot_bypass_envelope_checks(config, carbon_message, case, reason):
+    carbon = carbon_message(message())
+    received = carbon.xml.find(f"{{{CARBONS}}}received")
+    forwarded = received.find(f"{{{FORWARD}}}forwarded")
+    inner = forwarded[0]
+    if case == "foreign-sender":
+        carbon["from"] = "stranger@example.org"
+    elif case == "own-full-sender":
+        carbon["from"] = f"{config.jid}/other-resource"
+    elif case == "missing-sender":
+        del carbon["from"]
+    elif case == "foreign-recipient":
+        carbon["to"] = "stranger@example.org"
+    elif case == "missing-recipient":
+        del carbon["to"]
+    elif case == "foreign-inner-recipient":
+        inner.set("to", "stranger@example.org")
+    elif case == "missing-inner-recipient":
+        del inner.attrib["to"]
+    elif case == "missing-inner-sender":
+        del inner.attrib["from"]
+    elif case == "own-inner-sender":
+        inner.set("from", f"{config.jid}/phone")
+    elif case == "error-outer":
+        carbon["type"] = "error"
+    elif case == "error-inner":
+        inner.set("type", "error")
+    elif case == "receipt-inner":
+        ET.SubElement(inner, "{urn:xmpp:receipts}received")
+    elif case == "sent":
+        received.tag = f"{{{CARBONS}}}sent"
+    elif case == "mixed":
+        ET.SubElement(carbon.xml, f"{{{CARBONS}}}sent")
+    elif case == "duplicate-received":
+        ET.SubElement(carbon.xml, f"{{{CARBONS}}}received")
+    elif case == "empty-carbon":
+        received.remove(forwarded)
+    elif case == "empty-forwarded":
+        forwarded.remove(inner)
+    elif case == "duplicate-forwarded":
+        ET.SubElement(received, f"{{{FORWARD}}}forwarded")
+    elif case == "duplicate-inner":
+        forwarded.append(message().xml)
+    elif case == "iq-inner":
+        inner.tag = "{jabber:client}iq"
+    elif case == "nested-carbon":
+        ET.SubElement(inner, f"{{{CARBONS}}}received")
+        inner.set("from", config.jid)
+    elif case == "nested-forwarded":
+        ET.SubElement(inner, f"{{{FORWARD}}}forwarded")
+    elif case == "mam":
+        ET.SubElement(inner, "{urn:xmpp:mam:2}result")
+    elif case == "delay-outer":
+        ET.SubElement(carbon.xml, f"{{{DELAY}}}delay")
+    elif case == "delay-forwarded":
+        ET.SubElement(forwarded, f"{{{DELAY}}}delay")
+    elif case == "delay-inner":
+        ET.SubElement(inner, f"{{{DELAY}}}delay")
+    elif case == "legacy-delay":
+        ET.SubElement(inner, "{jabber:x:delay}x")
+    assert incoming_stanza(carbon, config.jid) == (None, reason)
 
 
 def test_delivery_id_scoped_by_sender_and_origin_id():
@@ -78,7 +185,7 @@ async def test_encrypted_command_and_duplicate(config, database, plugin, monkeyp
     assert plugin.decrypt_message.await_count == 1
     outgoing.send.assert_called_once()
     sent_plaintext = plugin.encrypt_message.call_args.args[0]
-    assert sent_plaintext["body"] == "pong"
+    assert sent_plaintext["body"] == "Га-Га-Га!"
     assert str(sent_plaintext["to"]) == "parent@example.org"
     # Сам клиент не подключался к сети; plugin_end требуется только реальному плагину.
 
@@ -125,6 +232,119 @@ async def test_admission_queue_is_bounded_and_checks_identity(config, database):
         client.admit(message())
     assert client.queue.qsize() == 64
     await client.close()
+
+
+async def test_received_carbon_uses_inner_allowlist(config, database, carbon_message):
+    client = GooseClient(config, "test-only", database)
+    client.init_plugins()
+    client.ready.set()
+    client.admit(carbon_message(message(sender="stranger@example.org")))
+    client.admit(carbon_message(message(), direction="sent"))
+    assert client.queue.empty()
+    client.admit(carbon_message(message()))
+    assert str(client.queue.get_nowait()["from"]) == "parent@example.org/mobile"
+    await client.close()
+
+
+@pytest.mark.parametrize("mode,priority", [("service", 0), ("probe", -1), ("maintenance", -1)])
+async def test_only_service_accepts_bare_delivery_and_runs_commands(config, database, monkeypatch, mode, priority):
+    client = GooseClient(config, "test-only", database,
+                         probe=mode == "probe", maintenance=mode == "maintenance")
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info",
+                        AsyncMock(return_value={"disco_info": {"features": [CARBONS]}}))
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", AsyncMock())
+    if mode != "probe":
+        monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager",
+                            AsyncMock(return_value=Mock()))
+    await client.on_start(None)
+    assert client.ready.is_set()
+    client.send_presence.assert_called_once_with(ppriority=priority)
+    assert hasattr(client, "commands") == (mode == "service")
+    assert (client.worker is not None) == (mode == "service")
+    await client.close()
+
+
+async def test_management_action_never_starts_command_service(config, monkeypatch):
+    monkeypatch.setenv(config.password_env, "test-only")
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), close=AsyncMock())
+    client.connect = client.ready.set
+    factory = Mock(return_value=client)
+    action = AsyncMock()
+    await run_sessions(config, None, asyncio.Event(), action=action, client_factory=factory)
+    assert factory.call_args.kwargs["maintenance"] is True
+    action.assert_awaited_once_with(client)
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize("domain_features,account_features,carbons,mam", [
+    ([CARBONS], [MAM], True, True),
+    ([CARBONS, MAM], [], True, False),
+    ([], [MAM], False, True),
+    ([], [], False, False),
+])
+async def test_mam_discovery_uses_account_not_domain(config, monkeypatch, domain_features, account_features, carbons, mam):
+    client = GooseClient(config, "test-only", probe=True)
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    async def info(*, jid, **kwargs):
+        if jid == config.jid:
+            assert kwargs["local"] is False
+            assert kwargs["cached"] is False
+            return {"disco_info": {"features": account_features}}
+        assert jid == JID(config.jid).domain
+        return {"disco_info": {"features": domain_features}}
+    disco = AsyncMock(side_effect=info)
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info", disco)
+    enable = AsyncMock()
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", enable)
+    try:
+        await client.on_start(None)
+        assert client.ready.is_set()
+        assert client.features == {"carbons": carbons, "mam": mam}
+        assert enable.await_count == int(carbons)
+        assert disco.await_count == 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("failure", [IqError, IqTimeout, asyncio.CancelledError])
+async def test_mam_discovery_failure_is_unknown_and_cancellation_propagates(config, monkeypatch, failure):
+    from goose import transport
+    client = GooseClient(config, "test-only", probe=True)
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    iq = Iq()
+    iq["error"]["condition"] = "forbidden"
+    iq["error"]["text"] = "private-diagnostic-must-not-be-logged"
+    error = failure() if failure is asyncio.CancelledError else failure(iq)
+    disco = AsyncMock(side_effect=[{"disco_info": {"features": [CARBONS, MAM]}}, error])
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info", disco)
+    enable = AsyncMock()
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", enable)
+    warning = Mock()
+    monkeypatch.setattr(transport.log, "warning", warning)
+    try:
+        if failure is asyncio.CancelledError:
+            with pytest.raises(asyncio.CancelledError):
+                await client.on_start(None)
+            assert not client.ready.is_set()
+            warning.assert_not_called()
+        else:
+            await client.on_start(None)
+            assert client.ready.is_set()
+            assert not client.failed
+            assert "MAM=не проверено" in client.status()
+            enable.assert_awaited_once_with(timeout=10)
+            warning.assert_called_once_with("xmpp_discovery_incomplete feature=mam")
+        assert client.features == {"carbons": True, "mam": "не проверено"}
+        assert disco.await_count == 2
+    finally:
+        await client.close()
 
 
 async def test_tls_and_probe_has_no_omemo_or_database(config):
@@ -198,9 +418,13 @@ async def test_stop_closes_running_session(config, monkeypatch):
     client.close.assert_awaited_once()
 
 
-def test_local_doctor_does_not_create_identity(config, capsys):
+def test_local_doctor_does_not_create_identity(config, capsys, monkeypatch):
+    monkeypatch.delenv(config.password_env, raising=False)
     doctor(config)
-    assert "ещё не создана" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "ещё не создана" in output
+    assert "не передан текущему процессу" in output
+    assert "Локальная диагностика завершена успешно" in output
     assert list(config.data_dir.iterdir()) == []
 
 
@@ -208,6 +432,17 @@ def test_cli_missing_password_is_redacted(config_file, monkeypatch, capsys):
     monkeypatch.delenv("GOOSE_XMPP_PASSWORD", raising=False)
     assert main(["run", "--config", str(config_file)]) == 2
     assert "Пароль XMPP" in capsys.readouterr().err
+
+
+def test_cli_permission_error_has_safe_message(config_file, monkeypatch, capsys):
+    from goose import cli
+    def denied(*args, **kwargs):
+        raise PermissionError("do-not-print-private-path-or-secret")
+    monkeypatch.setattr(cli, "load_config", denied)
+    assert main(["doctor", "--config", str(config_file)]) == 2
+    error = capsys.readouterr().err
+    assert "недостаточно прав" in error
+    assert "do-not-print" not in error
 
 
 def test_third_party_logs_suppressed(capsys):

@@ -61,7 +61,9 @@ def doctor(config):
     else:
         print("SQLite: ещё не создана; идентичность создаст первый запуск сервиса.")
     print("Модель, API и расписание: не поддерживаются на этапе 1; запросов нет.")
-    print("Пароль XMPP: " + ("переменная задана" if os.environ.get(config.password_env) else "не задан; нужен для run/--xmpp"))
+    print("Пароль XMPP: " + ("переменная задана" if os.environ.get(config.password_env)
+                            else "не передан текущему процессу; нужен для run/--xmpp"))
+    print("Локальная диагностика завершена успешно. Эта проверка не подключается к XMPP.")
 
 
 async def execute(args, config):
@@ -135,6 +137,11 @@ def main(argv=None):
         return 2
     except KeyboardInterrupt:
         return 130
+    except PermissionError:
+        print("Ошибка: недостаточно прав для доступа к конфигурации или рабочим каталогам. "
+              "Запустите команду из доступного каталога и проверьте права пользователя сервиса.",
+              file=sys.stderr)
+        return 2
     except Exception:
         print("Ошибка выполнения; проверьте права, зависимости, SQLite и доступность XMPP.", file=sys.stderr)
         return 1

@@ -83,7 +83,7 @@ async def test_cancellation_waits_for_database_commit(database):
 
 async def test_commands_and_authorization(config, database):
     commands = Commands(config, database)
-    assert await commands.handle(PARENT + "/phone", "!ping") == "pong"
+    assert await commands.handle(PARENT + "/phone", "!ping") == "Га-Га-Га!"
     assert "диагностическом" in await commands.handle(CHILD, "!help")
     assert await commands.handle(CHILD, "обычный текст") is None
     assert await commands.handle("unknown@example.org", "!ping") is None

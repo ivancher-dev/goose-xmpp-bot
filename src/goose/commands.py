@@ -24,7 +24,7 @@ class Commands:
         if words == ["!help"]:
             return HELP
         if words == ["!ping"]:
-            return "pong"
+            return "Га-Га-Га!"
         if words[0] == "!echo":
             if sender not in self.config.admins or not self.config.echo_enabled:
                 return "Эхо недоступно."

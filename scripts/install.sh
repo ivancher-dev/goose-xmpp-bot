@@ -111,11 +111,16 @@ if ! $local_install; then
     install -m 644 "$prefix/goose-xmpp-bot.service" /etc/systemd/system/goose-xmpp-bot.service
     systemctl daemon-reload
 fi
-if $local_install; then
-    "$prefix/venv/bin/goose-bot" doctor --config "$config"
-else
-    runuser -u goose-xmpp-bot -- "$prefix/venv/bin/goose-bot" doctor --config "$config"
-fi
+(
+    # runuser сохраняет cwd вызывающего пользователя. Checkout в /root может
+    # быть недоступен сервису; диагностика работает из каталога установки.
+    cd -- "$prefix"
+    if $local_install; then
+        "$prefix/venv/bin/goose-bot" doctor --config "$config"
+    else
+        runuser -u goose-xmpp-bot -- "$prefix/venv/bin/goose-bot" doctor --config "$config"
+    fi
+)
 echo 'Файлы установлены; настройки и существующие ключи сохранены.'
 echo 'Перед запуском заполните тестовые JID, allowlist и защищённый файл окружения.'
 if $start; then
