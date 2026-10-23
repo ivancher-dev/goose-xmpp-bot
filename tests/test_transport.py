@@ -11,7 +11,7 @@ from slixmpp import Message
 from goose.cli import configure_logging, doctor, main
 from goose.config import ConfigError
 from goose.omemo import LEGACY_NS, GooseOmemo, ManualTrustRequired
-from goose.transport import GooseClient, classify, delivery_key, run_sessions
+from goose.transport import CARBONS, DELAY, FORWARD, GooseClient, classify, delivery_key, incoming_stanza, run_sessions
 
 
 def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1", kind="chat"):
@@ -35,6 +35,112 @@ def message(sender="parent@example.org/mobile", body="!ping", extra="", id="msg1
 ])
 def test_envelopes_not_commands(sender, extra, kind, reason, config):
     assert classify(message(sender, extra=extra, kind=kind), config.jid) == reason
+
+
+def test_received_carbon_preserves_original_identity_and_ciphertext(config, carbon_message):
+    original = message(extra=f'<encrypted xmlns="{LEGACY_NS}"><header sid="42"/></encrypted>')
+    carbon = carbon_message(original)
+    inner, source = incoming_stanza(carbon, config.jid)
+    assert source == "received-carbon"
+    assert str(inner["from"]) == str(original["from"])
+    assert str(inner["to"]) == str(original["to"])
+    assert inner["id"] == original["id"]
+    assert ET.tostring(inner.xml) == ET.tostring(original.xml)
+    # Расшифровка не должна менять XML внешней оболочки.
+    inner["body"] = "changed"
+    assert carbon.xml.find(f".//{{jabber:client}}body").text == "!ping"
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("foreign-sender", "invalid-carbon"),
+    ("own-full-sender", "invalid-carbon"),
+    ("missing-sender", "invalid-sender"),
+    ("foreign-recipient", "invalid-carbon"),
+    ("missing-recipient", "invalid-carbon"),
+    ("foreign-inner-recipient", "invalid-carbon"),
+    ("missing-inner-recipient", "invalid-carbon"),
+    ("missing-inner-sender", "invalid-sender"),
+    ("own-inner-sender", "own"),
+    ("error-outer", "invalid-carbon"),
+    ("error-inner", "service"),
+    ("receipt-inner", "receipt"),
+    ("sent", "sent-carbon"),
+    ("mixed", "invalid-carbon"),
+    ("duplicate-received", "invalid-carbon"),
+    ("empty-carbon", "invalid-carbon"),
+    ("empty-forwarded", "invalid-carbon"),
+    ("duplicate-forwarded", "invalid-carbon"),
+    ("duplicate-inner", "invalid-carbon"),
+    ("iq-inner", "invalid-carbon"),
+    ("nested-carbon", "carbon"),
+    ("nested-forwarded", "forwarded"),
+    ("mam", "archive"),
+    ("delay-outer", "delayed"),
+    ("delay-forwarded", "delayed"),
+    ("delay-inner", "delayed"),
+    ("legacy-delay", "delayed"),
+])
+def test_carbon_cannot_bypass_envelope_checks(config, carbon_message, case, reason):
+    carbon = carbon_message(message())
+    received = carbon.xml.find(f"{{{CARBONS}}}received")
+    forwarded = received.find(f"{{{FORWARD}}}forwarded")
+    inner = forwarded[0]
+    if case == "foreign-sender":
+        carbon["from"] = "stranger@example.org"
+    elif case == "own-full-sender":
+        carbon["from"] = f"{config.jid}/other-resource"
+    elif case == "missing-sender":
+        del carbon["from"]
+    elif case == "foreign-recipient":
+        carbon["to"] = "stranger@example.org"
+    elif case == "missing-recipient":
+        del carbon["to"]
+    elif case == "foreign-inner-recipient":
+        inner.set("to", "stranger@example.org")
+    elif case == "missing-inner-recipient":
+        del inner.attrib["to"]
+    elif case == "missing-inner-sender":
+        del inner.attrib["from"]
+    elif case == "own-inner-sender":
+        inner.set("from", f"{config.jid}/phone")
+    elif case == "error-outer":
+        carbon["type"] = "error"
+    elif case == "error-inner":
+        inner.set("type", "error")
+    elif case == "receipt-inner":
+        ET.SubElement(inner, "{urn:xmpp:receipts}received")
+    elif case == "sent":
+        received.tag = f"{{{CARBONS}}}sent"
+    elif case == "mixed":
+        ET.SubElement(carbon.xml, f"{{{CARBONS}}}sent")
+    elif case == "duplicate-received":
+        ET.SubElement(carbon.xml, f"{{{CARBONS}}}received")
+    elif case == "empty-carbon":
+        received.remove(forwarded)
+    elif case == "empty-forwarded":
+        forwarded.remove(inner)
+    elif case == "duplicate-forwarded":
+        ET.SubElement(received, f"{{{FORWARD}}}forwarded")
+    elif case == "duplicate-inner":
+        forwarded.append(message().xml)
+    elif case == "iq-inner":
+        inner.tag = "{jabber:client}iq"
+    elif case == "nested-carbon":
+        ET.SubElement(inner, f"{{{CARBONS}}}received")
+        inner.set("from", config.jid)
+    elif case == "nested-forwarded":
+        ET.SubElement(inner, f"{{{FORWARD}}}forwarded")
+    elif case == "mam":
+        ET.SubElement(inner, "{urn:xmpp:mam:2}result")
+    elif case == "delay-outer":
+        ET.SubElement(carbon.xml, f"{{{DELAY}}}delay")
+    elif case == "delay-forwarded":
+        ET.SubElement(forwarded, f"{{{DELAY}}}delay")
+    elif case == "delay-inner":
+        ET.SubElement(inner, f"{{{DELAY}}}delay")
+    elif case == "legacy-delay":
+        ET.SubElement(inner, "{jabber:x:delay}x")
+    assert incoming_stanza(carbon, config.jid) == (None, reason)
 
 
 def test_delivery_id_scoped_by_sender_and_origin_id():
@@ -125,6 +231,51 @@ async def test_admission_queue_is_bounded_and_checks_identity(config, database):
         client.admit(message())
     assert client.queue.qsize() == 64
     await client.close()
+
+
+async def test_received_carbon_uses_inner_allowlist(config, database, carbon_message):
+    client = GooseClient(config, "test-only", database)
+    client.init_plugins()
+    client.ready.set()
+    client.admit(carbon_message(message(sender="stranger@example.org")))
+    client.admit(carbon_message(message(), direction="sent"))
+    assert client.queue.empty()
+    client.admit(carbon_message(message()))
+    assert str(client.queue.get_nowait()["from"]) == "parent@example.org/mobile"
+    await client.close()
+
+
+@pytest.mark.parametrize("mode,priority", [("service", 0), ("probe", -1), ("maintenance", -1)])
+async def test_only_service_accepts_bare_delivery_and_runs_commands(config, database, monkeypatch, mode, priority):
+    client = GooseClient(config, "test-only", database,
+                         probe=mode == "probe", maintenance=mode == "maintenance")
+    client.init_plugins()
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info",
+                        AsyncMock(return_value={"disco_info": {"features": [CARBONS]}}))
+    monkeypatch.setattr(client.plugin["xep_0280"], "enable", AsyncMock())
+    if mode != "probe":
+        monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager",
+                            AsyncMock(return_value=Mock()))
+    await client.on_start(None)
+    assert client.ready.is_set()
+    client.send_presence.assert_called_once_with(ppriority=priority)
+    assert hasattr(client, "commands") == (mode == "service")
+    assert (client.worker is not None) == (mode == "service")
+    await client.close()
+
+
+async def test_management_action_never_starts_command_service(config, monkeypatch):
+    monkeypatch.setenv(config.password_env, "test-only")
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), close=AsyncMock())
+    client.connect = client.ready.set
+    factory = Mock(return_value=client)
+    action = AsyncMock()
+    await run_sessions(config, None, asyncio.Event(), action=action, client_factory=factory)
+    assert factory.call_args.kwargs["maintenance"] is True
+    action.assert_awaited_once_with(client)
+    client.close.assert_awaited_once()
 
 
 async def test_tls_and_probe_has_no_omemo_or_database(config):

@@ -2,13 +2,14 @@
 
 import asyncio
 from contextlib import suppress
+from copy import deepcopy
 import hashlib
 import logging
 import secrets
 import ssl
 import xml.etree.ElementTree as ET
 
-from slixmpp import ClientXMPP, JID
+from slixmpp import ClientXMPP, JID, Message
 from slixmpp.xmlstream.handler import Callback
 from slixmpp.xmlstream.matcher import MatchXPath
 
@@ -25,20 +26,20 @@ DELAY = "urn:xmpp:delay"
 
 
 def classify(stanza, own_jid):
-    """Оболочки никогда не исполняются как команды, включая поддельные Carbons."""
+    """Классифицировать внешнюю stanza до допуска к обработке команд."""
     xml = stanza.xml
     try:
         sender = bare_jid(str(stanza["from"]))
     except ConfigError:
         return "invalid-sender"
-    if xml.find(f"{{{CARBONS}}}sent") is not None or xml.find(f"{{{CARBONS}}}received") is not None:
-        return "carbon" if sender == own_jid else "invalid-carbon"
     if any(e.tag.startswith("{urn:xmpp:mam:") for e in xml.iter()):
         return "archive"
-    if xml.find(f".//{{{FORWARD}}}forwarded") is not None:
-        return "forwarded"
     if xml.find(f".//{{{DELAY}}}delay") is not None or xml.find(".//{jabber:x:delay}x") is not None:
         return "delayed"
+    if xml.find(f"{{{CARBONS}}}sent") is not None or xml.find(f"{{{CARBONS}}}received") is not None:
+        return "carbon" if sender == own_jid else "invalid-carbon"
+    if xml.find(f".//{{{FORWARD}}}forwarded") is not None:
+        return "forwarded"
     if sender == own_jid:
         return "own"
     if stanza["type"] not in {"chat", "normal"}:
@@ -46,6 +47,42 @@ def classify(stanza, own_jid):
     if xml.find("{urn:xmpp:receipts}received") is not None or xml.find("{urn:xmpp:chat-markers:0}displayed") is not None:
         return "receipt"
     return "direct"
+
+
+def incoming_stanza(stanza, own_jid):
+    """Принять только прямую доставку или проверенную живую received-копию.
+
+    Авторизация выполняется по внутреннему from, после расшифровки дополнительно
+    проверяется устройство. Внешний from Carbons обязан быть точным bare JID бота.
+    """
+    reason = classify(stanza, own_jid)
+    if reason != "carbon":
+        return (stanza, reason) if reason == "direct" else (None, reason)
+    if str(stanza["from"]) != own_jid or stanza["type"] not in {"chat", "normal"}:
+        return None, "invalid-carbon"
+    received = stanza.xml.findall(f"{{{CARBONS}}}received")
+    sent = stanza.xml.findall(f"{{{CARBONS}}}sent")
+    if len(sent) == 1 and not received:
+        return None, "sent-carbon"
+    if len(received) != 1 or sent:
+        return None, "invalid-carbon"
+    children = list(received[0])
+    if len(children) != 1 or children[0].tag != f"{{{FORWARD}}}forwarded":
+        return None, "invalid-carbon"
+    forwarded = list(children[0])
+    if len(forwarded) != 1 or forwarded[0].tag != "{jabber:client}message":
+        return None, "invalid-carbon"
+    inner = Message(xml=deepcopy(forwarded[0]), stream=stanza.stream)
+    try:
+        if (bare_jid(str(stanza["to"])) != own_jid
+                or bare_jid(str(inner["to"])) != own_jid):
+            return None, "invalid-carbon"
+    except ConfigError:
+        return None, "invalid-carbon"
+    inner_reason = classify(inner, own_jid)
+    if inner_reason != "direct":
+        return None, inner_reason
+    return inner, "received-carbon"
 
 
 def delivery_key(stanza):
@@ -59,12 +96,13 @@ def delivery_key(stanza):
 
 
 class GooseClient(ClientXMPP):
-    def __init__(self, config, password, database=None, *, probe=False):
+    def __init__(self, config, password, database=None, *, probe=False, maintenance=False):
         suffix = f"doctor-{secrets.token_hex(4)}" if probe else config.resource
         super().__init__(f"{config.jid}/{suffix}", password)
         self.config = config
         self.database = database
         self.probe = probe
+        self.serving_commands = not (probe or maintenance)
         self.ready = asyncio.Event()
         self.ended = asyncio.Event()
         self.failed = False
@@ -84,6 +122,7 @@ class GooseClient(ClientXMPP):
             self.register_plugin(name)
         if not probe:
             register(self, OmemoStorage(database))
+        if self.serving_commands:
             self.commands = Commands(config, database, self.status)
             self.register_handler(Callback("Goose messages", MatchXPath(f"{{{self.default_ns}}}message"), self.admit))
         self.add_event_handler("session_start", self.on_start)
@@ -128,7 +167,9 @@ class GooseClient(ClientXMPP):
                 raise ConfigError("Сервер привязал непредусмотренный аккаунт.")
             # Список контактов не даёт прав; принятие подписок выключено.
             await self.get_roster(timeout=10)
-            self.send_presence(ppriority=-1)
+            # Отрицательный приоритет исключает bare-доставку по RFC 6121.
+            # Сервис принимает её, а временные проверки/управление — только IQ/PEP.
+            self.send_presence(ppriority=0 if self.serving_commands else -1)
             info = await self.plugin["xep_0030"].get_info(jid=self.boundjid.domain, timeout=10)
             supported = set(info["disco_info"]["features"])
             self.features = {"carbons": CARBONS in supported, "mam": MAM in supported}
@@ -142,7 +183,8 @@ class GooseClient(ClientXMPP):
                     # выходом процесса: asyncio.run отменит и её внутренние задачи.
                     self.on_initialization_failure(None)
                     raise
-                self.worker = asyncio.create_task(self.process_queue())
+                if self.serving_commands:
+                    self.worker = asyncio.create_task(self.process_queue())
             self.ready.set()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
         except asyncio.CancelledError:
@@ -159,15 +201,17 @@ class GooseClient(ClientXMPP):
                 "архив не запускает команды; модель и расписание отключены.")
 
     def admit(self, stanza):
-        reason = classify(stanza, self.config.jid)
-        if reason != "direct":
+        if not self.ready.is_set() or len(ET.tostring(stanza.xml)) > 65536:
+            return
+        incoming, reason = incoming_stanza(stanza, self.config.jid)
+        if incoming is None:
             log.info("message_ignored reason=%s", reason)
             return
-        if (not self.ready.is_set() or bare_jid(str(stanza["from"])) not in self.config.allowed
-                or len(ET.tostring(stanza.xml)) > 65536):
+        if bare_jid(str(incoming["from"])) not in self.config.allowed:
             return
         try:
-            self.queue.put_nowait(stanza)
+            self.queue.put_nowait(incoming)
+            log.info("message_received source=%s", reason)
         except asyncio.QueueFull:
             log.warning("message_ignored reason=queue_full")
 
@@ -217,6 +261,7 @@ class GooseClient(ClientXMPP):
             encrypted["eme"]["name"] = "OMEMO"
             if self.ready.is_set():
                 encrypted.send()
+                log.info("reply_queued")
         except ManualTrustRequired:
             log.warning("reply_blocked reason=manual_trust_required")
         except Exception:
@@ -251,7 +296,8 @@ async def wait_ready(client, stop, timeout):
 async def run_sessions(config, database, stop, action=None, *, probe=False, client_factory=GooseClient):
     password = config.password()  # Отсутствующий секрет не запускает повторов.
     for attempt in range(config.max_attempts):
-        client = client_factory(config, password, database, probe=probe)
+        client = client_factory(config, password, database, probe=probe,
+                                maintenance=action is not None)
         try:
             client.connect()
             if await wait_ready(client, stop, config.connect_timeout):

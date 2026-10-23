@@ -122,7 +122,8 @@ async def test_real_crypto_identity_trust_sessions_survive_restart(tmp_path):
             await bob.shutdown()
 
 
-async def test_plugin_real_xml_encrypted_ping_and_reply(config, database, tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_carbon", [False, True])
+async def test_plugin_real_xml_encrypted_ping_and_reply(config, database, tmp_path, monkeypatch, carbon_message, first_carbon):
     pep = Pep()
     bot_manager, _ = await create_manager(pep, tmp_path / "bot-crypto", config.jid)
     parent_manager, parent_db = await create_manager(pep, tmp_path / "parent-crypto", "parent@example.org")
@@ -149,13 +150,19 @@ async def test_plugin_real_xml_encrypted_ping_and_reply(config, database, tmp_pa
         # send() отправлял бы в сокет; заменяем именно передачу, не шифрование.
         captured = []
         monkeypatch.setattr(bot, "send", lambda stanza, **kwargs: captured.append(stanza))
-        await bot.process_message(encrypted)
+        carbon = carbon_message(encrypted)
+        deliveries = (carbon, encrypted) if first_carbon else (encrypted, carbon)
+        bot.admit(deliveries[0])
+        assert bot.queue.qsize() == 1
+        await bot.process_message(bot.queue.get_nowait())
         assert len(captured) == 1
         assert captured[0]["body"] != "pong"
         decoded, device = await parent.plugin["xep_0384"].decrypt_message(captured[0])
         assert decoded["body"] == "pong"
         assert device.bare_jid == config.jid
-        await bot.process_message(encrypted)
+        bot.admit(deliveries[1])
+        assert bot.queue.qsize() == 1
+        await bot.process_message(bot.queue.get_nowait())
         assert len(captured) == 1
     finally:
         await bot_manager.shutdown()
