@@ -198,9 +198,13 @@ async def test_stop_closes_running_session(config, monkeypatch):
     client.close.assert_awaited_once()
 
 
-def test_local_doctor_does_not_create_identity(config, capsys):
+def test_local_doctor_does_not_create_identity(config, capsys, monkeypatch):
+    monkeypatch.delenv(config.password_env, raising=False)
     doctor(config)
-    assert "ещё не создана" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "ещё не создана" in output
+    assert "не передан текущему процессу" in output
+    assert "Локальная диагностика завершена успешно" in output
     assert list(config.data_dir.iterdir()) == []
 
 
@@ -208,6 +212,17 @@ def test_cli_missing_password_is_redacted(config_file, monkeypatch, capsys):
     monkeypatch.delenv("GOOSE_XMPP_PASSWORD", raising=False)
     assert main(["run", "--config", str(config_file)]) == 2
     assert "Пароль XMPP" in capsys.readouterr().err
+
+
+def test_cli_permission_error_has_safe_message(config_file, monkeypatch, capsys):
+    from goose import cli
+    def denied(*args, **kwargs):
+        raise PermissionError("do-not-print-private-path-or-secret")
+    monkeypatch.setattr(cli, "load_config", denied)
+    assert main(["doctor", "--config", str(config_file)]) == 2
+    error = capsys.readouterr().err
+    assert "недостаточно прав" in error
+    assert "do-not-print" not in error
 
 
 def test_third_party_logs_suppressed(capsys):

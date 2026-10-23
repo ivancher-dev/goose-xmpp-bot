@@ -111,7 +111,23 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     if source_root is not None:
         roots.append(source_root.resolve())
     # При запуске установленного wheel исходники могут находиться в текущем checkout.
-    roots.extend(p for p in [Path.cwd(), *Path.cwd().parents] if (p / ".git").exists())
+    # runuser может унаследовать cwd внутри /root. Обнаружение checkout —
+    # дополнительная проверка, а не условие чтения абсолютного пути конфига.
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        cwd = None
+    if cwd is not None:
+        for candidate in (cwd, *cwd.parents):
+            try:
+                marker = candidate / ".git"
+                # Пустые .git-каталоги могут быть защитными заглушками среды.
+                # HEAD отличает каталог Git, а .git-файл поддерживает linked checkout.
+                if marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file()):
+                    roots.append(candidate)
+            except OSError:
+                # Для недоступного cwd нельзя надёжно определить enclosing checkout.
+                break
     if any(data_dir.is_relative_to(root) for root in roots):
         raise ConfigError("data_dir должен находиться вне исходников и virtualenv.")
     xmpp = table(data, "xmpp", {"jid", "resource", "password_env", "require_tls", "omemo"},
