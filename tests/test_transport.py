@@ -184,7 +184,7 @@ async def test_encrypted_command_and_duplicate(config, database, plugin, monkeyp
     assert plugin.decrypt_message.await_count == 1
     outgoing.send.assert_called_once()
     sent_plaintext = plugin.encrypt_message.call_args.args[0]
-    assert sent_plaintext["body"] == "pong"
+    assert sent_plaintext["body"] == "Га-Га-Га!"
     assert str(sent_plaintext["to"]) == "parent@example.org"
     # Сам клиент не подключался к сети; plugin_end требуется только реальному плагину.
 

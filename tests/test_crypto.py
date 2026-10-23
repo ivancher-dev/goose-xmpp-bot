@@ -156,9 +156,9 @@ async def test_plugin_real_xml_encrypted_ping_and_reply(config, database, tmp_pa
         assert bot.queue.qsize() == 1
         await bot.process_message(bot.queue.get_nowait())
         assert len(captured) == 1
-        assert captured[0]["body"] != "pong"
+        assert captured[0]["body"] != "Га-Га-Га!"
         decoded, device = await parent.plugin["xep_0384"].decrypt_message(captured[0])
-        assert decoded["body"] == "pong"
+        assert decoded["body"] == "Га-Га-Га!"
         assert device.bare_jid == config.jid
         bot.admit(deliveries[1])
         assert bot.queue.qsize() == 1
