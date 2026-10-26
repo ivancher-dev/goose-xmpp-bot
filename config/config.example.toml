@@ -1,4 +1,4 @@
-# Конфигурация этапа 1. LLM, memory и schedule — проверяемые неактивные настройки.
+# Конфигурация этапа 2. Модель включается явно; расписание пока не реализовано.
 # Все аккаунты и идентификаторы расписания в этом файле вымышлены.
 config_version = 1
 timezone = "Europe/Moscow"
@@ -34,6 +34,10 @@ api_key_env = "GOOSE_LLM_API_KEY"
 timeout_seconds = 30
 max_output_tokens = 700
 max_concurrent_requests = 2
+requests_per_minute = 12
+max_attempts = 2
+# Редактируемый образ вне исходников; файл создаёт установщик.
+persona_file = "/etc/goose-xmpp-bot/persona.md"
 
 [memory]
 recent_messages = 24

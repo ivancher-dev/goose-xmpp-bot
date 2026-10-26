@@ -1,18 +1,21 @@
-"""Детерминированные команды этапа 1. Свободный текст не получает ответа."""
+"""Детерминированные команды: права проверяются до обращения к модели."""
 
 from .config import ConfigError, bare_jid
 
 
-HELP = ("Гусь работает в диагностическом режиме: !help, !ping. "
-        "Свободные сообщения не вызывают автоответ. "
+HELP = ("Диагностические команды: !help, !ping. Очистка своей памяти: !context clear. "
+        "На свободные сообщения Гусь отвечает только в auto при включённой модели. "
         "Владельцу: !admin status, !admin user show <bare_jid>, "
         "!admin user set <bare_jid> grade=N|academic_year=YYYY-YYYY|schedule_class_id=ID. "
+        "Режим диалога: !admin mode <bare_jid> [manual|auto]. "
+        "После подключения сервиса auto требует повторного подтверждения. "
         "!echo <текст> доступен только владельцу при echo_enabled=true.")
 
 
 class Commands:
-    def __init__(self, config, database, status=lambda: "Диагностический режим; генерация отключена."):
+    def __init__(self, config, database, status=lambda: "Этап 2; модель отключена.", dialogues=None):
         self.config, self.database, self.status = config, database, status
+        self.dialogues = dialogues
 
     async def handle(self, sender, body):
         sender = bare_jid(sender)
@@ -25,6 +28,15 @@ class Commands:
             return HELP
         if words == ["!ping"]:
             return "Га-Га-Га!"
+        if words[0] == "!context":
+            if words != ["!context", "clear"]:
+                return "Использование: !context clear"
+            if self.dialogues:
+                await self.dialogues.clear(sender)
+            else:
+                await self.database.clear_context(sender)
+            return ("Контекст этого диалога у Гуся очищен. Профиль сохранён. "
+                    "История на XMPP-сервере, устройствах, у провайдера и в резервных копиях остаётся.")
         if words[0] == "!echo":
             if sender not in self.config.admins or not self.config.echo_enabled:
                 return "Эхо недоступно."
@@ -36,6 +48,15 @@ class Commands:
         if words == ["!admin", "status"]:
             return self.status()
         try:
+            if len(words) in (3, 4) and words[1] == "mode":
+                target = bare_jid(words[2], allow_resource=False)
+                if target not in self.config.allowed:
+                    raise ConfigError("Диалог вне списка разрешённых аккаунтов.")
+                if self.dialogues is None:
+                    raise ConfigError("Управление режимами доступно в запущенном сервисе.")
+                if len(words) == 4:
+                    await self.dialogues.set_mode(target, words[3])
+                return "Режим: " + await self.dialogues.mode(target)
             if len(words) not in (4, 5) or words[1] != "user" or words[2] not in {"show", "set"}:
                 raise ConfigError("Некорректный синтаксис команды профиля.")
             target = bare_jid(words[3], allow_resource=False)
@@ -53,7 +74,10 @@ class Commands:
                 if not value.isascii() or not value.isdecimal():
                     raise ConfigError("grade: требуется целое число от 1 до 11.")
                 value = int(value)
-            await self.database.update_profile(target, field, value)
+            if self.dialogues:
+                await self.dialogues.update_profile(target, field, value)
+            else:
+                await self.database.update_profile(target, field, value)
             return "Профиль обновлён."
         except ConfigError as exc:
             return str(exc)

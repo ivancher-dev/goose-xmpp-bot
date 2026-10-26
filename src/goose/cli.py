@@ -9,11 +9,14 @@ from pathlib import Path
 import signal
 import sqlite3
 import sys
+from dataclasses import replace
 
 from slixmpp import JID
 
 from . import __version__
 from .config import ConfigError, bare_jid, load_config
+from .dialogue import read_persona
+from .model import ModelError, OpenAICompatible
 from .omemo import fingerprint, set_verified_trust
 from .storage import Database, data_lock
 from .transport import run_sessions
@@ -52,15 +55,21 @@ def doctor(config):
         with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
-            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+            schema = db.execute("PRAGMA user_version").fetchone()[0]
+            if schema not in (1, 2):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
                 raise ConfigError("База данных не соответствует аккаунту конфигурации.")
-        print("SQLite: схема 1, целостность и привязка аккаунта проверены.")
+        print(f"SQLite: схема {schema}, целостность и привязка аккаунта проверены.")
     else:
         print("SQLite: ещё не создана; идентичность создаст первый запуск сервиса.")
-    print("Модель, API и расписание: не поддерживаются на этапе 1; запросов нет.")
+    print("Модель: " + ("включена; auto подтверждается владельцем" if config.llm.enabled else "отключена"))
+    if config.llm.enabled:
+        read_persona(config.llm.persona_file)
+        print("Образ Гуся: файл корректен; ключ API: " +
+              ("переменная задана" if os.environ.get(config.llm.api_key_env) else "не передан текущему процессу"))
+    print("Запросов к модели в локальной проверке нет. Расписание не реализовано.")
     print("Пароль XMPP: " + ("переменная задана" if os.environ.get(config.password_env)
                             else "не передан текущему процессу; нужен для run/--xmpp"))
     print("Локальная диагностика завершена успешно. Эта проверка не подключается к XMPP.")
@@ -81,8 +90,23 @@ async def execute(args, config):
                       f"Carbons={client.features['carbons']}, MAM={client.features['mam']}.")
                 print("Диагностический resource отдельный; OMEMO-плагин не загружался.")
             await run_sessions(config, None, stop, report, probe=True)
+        if args.api:
+            if not config.llm.enabled:
+                raise ConfigError("Для явной API-проверки заполните llm и включите llm.enabled.")
+            print("Явная API-проверка: один запрос может тарифицироваться провайдером.", flush=True)
+            model = OpenAICompatible(replace(config.llm, max_output_tokens=16, max_attempts=1))
+            try:
+                await model.complete([{"role": "user", "content": "Ответь одним словом: Га."}])
+                print("API: получен корректный текстовый ответ; содержимое не выводится.")
+            except ModelError:
+                raise ConfigError("API-проверка не прошла; проверьте модель, ключ, адрес и лимиты.") from None
+            finally:
+                await model.close()
         return
     config.password()
+    if args.command == "run" and config.llm.enabled:
+        config.llm.key()
+        await asyncio.to_thread(read_persona, config.llm.persona_file)
     with data_lock(config.data_dir):
         db = Database(config.data_dir, config.jid)
         await db.initialize(config.users)
@@ -110,7 +134,7 @@ async def execute(args, config):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Гусь: диагностический этап 1")
+    parser = argparse.ArgumentParser(description="Гусь: модель, память и явные режимы, этап 2")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "doctor", "devices", "trust"):
@@ -118,6 +142,7 @@ def main(argv=None):
         command.add_argument("--config", type=Path, required=True)
         if name == "doctor":
             command.add_argument("--xmpp", action="store_true", help="Явная сетевая проверка тестового аккаунта")
+            command.add_argument("--api", action="store_true", help="Явный запрос к модели, может тарифицироваться")
         if name in {"devices", "trust"}:
             command.add_argument("--jid", required=name == "trust")
         if name == "trust":

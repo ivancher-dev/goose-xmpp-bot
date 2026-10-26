@@ -14,6 +14,7 @@ from goose.config import ConfigError
 from goose.omemo import LEGACY_NS, ManualTrustRequired, fingerprint, set_verified_trust
 from goose.storage import Database, OmemoStorage
 from goose.transport import GooseClient
+from goose.dialogue import Dialogues
 
 
 class Pep:
@@ -167,3 +168,58 @@ async def test_plugin_real_xml_encrypted_ping_and_reply(config, database, tmp_pa
     finally:
         await bot_manager.shutdown()
         await parent_manager.shutdown()
+
+
+@pytest.mark.parametrize("first_carbon", [False, True])
+async def test_model_reply_uses_real_omemo_and_duplicate_only_requests_once(config, database, tmp_path, monkeypatch, carbon_message, first_carbon):
+    import asyncio
+    from types import SimpleNamespace
+    persona = tmp_path / "persona.md"
+    persona.write_text("Учебный Гусь.")
+    config = replace(config, llm=replace(config.llm, enabled=True, persona_file=persona))
+    sender = "pupil1@example.org"
+    pep = Pep()
+    bot_manager, _ = await create_manager(pep, tmp_path / "bot", config.jid)
+    peer_manager, peer_db = await create_manager(pep, tmp_path / "peer", sender)
+    bot = GooseClient(config, "fixture", database)
+    peer = GooseClient(replace(config, jid=sender), "fixture", peer_db)
+    bot.init_plugins()
+    peer.init_plugins()
+    model = SimpleNamespace(complete=AsyncMock(return_value="Давай разберём пример. Га!"), close=AsyncMock())
+    engine = Dialogues(config, database, model, bot.prepare_reply)
+    try:
+        for client, manager in ((bot, bot_manager), (peer, peer_manager)):
+            client.ready.set()
+            monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager", AsyncMock(return_value=manager))
+            async def refresh(jids, force_download=False, manager=manager):
+                for jid in jids:
+                    await manager.refresh_device_lists(jid.bare)
+            monkeypatch.setattr(client.plugin["xep_0384"], "refresh_device_lists", refresh)
+        await trust_peer(bot_manager, sender)
+        await trust_peer(peer_manager, config.jid)
+        await engine.initialize()
+        bot.dialogues = engine
+        bot.commands.dialogues = engine
+        await engine.set_mode(sender, "auto")
+        incoming = peer.make_message(mto=config.jid, mtype="chat", mbody="Объясни пример")
+        incoming["from"] = peer.boundjid
+        encrypted, errors = await peer.plugin["xep_0384"].encrypt_message(incoming, {JID(config.jid)})
+        assert not errors
+        captured = []
+        monkeypatch.setattr(bot, "send", lambda stanza, **kwargs: captured.append(stanza))
+        deliveries = (carbon_message(encrypted), encrypted) if first_carbon else (encrypted, carbon_message(encrypted))
+        for stanza in deliveries:
+            bot.admit(stanza)
+            await bot.process_message(bot.queue.get_nowait())
+        await asyncio.wait_for(asyncio.gather(*tuple(engine.tasks)), 2)
+        model.complete.assert_awaited_once()
+        assert len(captured) == 1
+        assert captured[0]["body"] != "Давай разберём пример. Га!"
+        decoded, device = await peer.plugin["xep_0384"].decrypt_message(captured[0])
+        assert decoded["body"] == "Давай разберём пример. Га!"
+        assert device.bare_jid == config.jid
+        assert "parent@example.org" not in str(model.complete.call_args)
+    finally:
+        await engine.close()
+        await bot_manager.shutdown()
+        await peer_manager.shutdown()

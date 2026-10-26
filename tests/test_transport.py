@@ -11,6 +11,7 @@ from slixmpp.exceptions import IqError, IqTimeout
 
 from goose.cli import configure_logging, doctor, main
 from goose.config import ConfigError
+from goose.dialogue import Dialogues
 from goose.omemo import LEGACY_NS, GooseOmemo, ManualTrustRequired
 from goose.transport import CARBONS, DELAY, FORWARD, MAM, GooseClient, classify, delivery_key, incoming_stanza, run_sessions
 
@@ -188,6 +189,78 @@ async def test_encrypted_command_and_duplicate(config, database, plugin, monkeyp
     assert sent_plaintext["body"] == "Га-Га-Га!"
     assert str(sent_plaintext["to"]) == "parent@example.org"
     # Сам клиент не подключался к сети; plugin_end требуется только реальному плагину.
+
+
+async def test_pause_command_passes_transport_while_model_is_waiting(config, database, plugin, monkeypatch, tmp_path):
+    persona = tmp_path / "persona.md"
+    persona.write_text("Учебный Гусь.")
+    config = replace(config, llm=replace(config.llm, enabled=True, persona_file=persona))
+    client = GooseClient(config, "fixture", database)
+    client.init_plugins()
+    client.ready.set()
+    monkeypatch.setitem(client.plugin._plugins, "xep_0384", plugin)
+    started, finish = asyncio.Event(), asyncio.Event()
+    async def complete(_messages):
+        started.set()
+        try:
+            await finish.wait()
+        except asyncio.CancelledError:
+            await finish.wait()
+        return "Запоздалый ответ"
+    engine = Dialogues(config, database, SimpleNamespace(complete=complete, close=AsyncMock()), client.prepare_reply)
+    await engine.initialize()
+    client.dialogues = client.commands.dialogues = engine
+    async def decrypt(stanza):
+        sender = "pupil1@example.org" if stanza["id"] == "question" else "parent@example.org"
+        text = "Вопрос" if stanza["id"] == "question" else "!admin mode pupil1@example.org manual"
+        return message(sender=sender, body=text), SimpleNamespace(bare_jid=sender, trust_level_name="TRUSTED")
+    plugin.decrypt_message.side_effect = decrypt
+    outgoing = message(extra=f'<encrypted xmlns="{LEGACY_NS}"/>')
+    monkeypatch.setattr(outgoing, "send", Mock())
+    plugin.encrypt_message.return_value = (outgoing, frozenset())
+    try:
+        await engine.set_mode("pupil1@example.org", "auto")
+        question = message(sender="pupil1@example.org", id="question", extra=f'<encrypted xmlns="{LEGACY_NS}"/>')
+        await asyncio.wait_for(client.process_message(question), 0.5)
+        await asyncio.wait_for(started.wait(), 1)
+        pause = message(id="pause", extra=f'<encrypted xmlns="{LEGACY_NS}"/>')
+        await asyncio.wait_for(client.process_message(pause), 0.5)
+        assert plugin.encrypt_message.call_args.args[0]["body"] == "Режим: manual"
+        finish.set()
+        await asyncio.wait_for(asyncio.gather(*tuple(engine.tasks), return_exceptions=True), 1)
+        outgoing.send.assert_called_once()
+        assert await engine.mode("pupil1@example.org") == "manual"
+    finally:
+        finish.set()
+        await engine.close()
+
+
+async def test_close_cancels_initialization_before_closing_dialogues(config, database, monkeypatch):
+    client = GooseClient(config, "fixture", database)
+    client.init_plugins()
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    async def initialize():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+    async def close():
+        assert cancelled.is_set()
+    dialogues = SimpleNamespace(initialize=initialize, close=AsyncMock(side_effect=close))
+    monkeypatch.setattr("goose.transport.Dialogues", lambda *args: dialogues)
+    monkeypatch.setattr(client, "get_roster", AsyncMock())
+    monkeypatch.setattr(client, "send_presence", Mock())
+    monkeypatch.setattr(client.plugin["xep_0030"], "get_info", AsyncMock(return_value={"disco_info": {"features": []}}))
+    monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager", AsyncMock(return_value=Mock()))
+    monkeypatch.setattr(client.plugin["xep_0384"], "aclose", AsyncMock())
+    starting = asyncio.create_task(client.on_start(None))
+    await asyncio.wait_for(entered.wait(), 1)
+    await client.close()
+    assert starting.cancelled()
+    assert not client.ready.is_set()
+    dialogues.close.assert_awaited_once()
 
 
 @pytest.mark.parametrize("failure", ["decrypt", "encrypt", "errors", "untrusted", "empty", "plaintext", "unsupported"])

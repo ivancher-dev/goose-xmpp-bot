@@ -35,7 +35,7 @@ async def test_no_cross_account_storage(config, database):
 
 
 async def test_schema_future_rejected(config, database):
-    await database.call(lambda db: db.execute("PRAGMA user_version=2"))
+    await database.call(lambda db: db.execute("PRAGMA user_version=3"))
     with pytest.raises(ConfigError, match="версия БД"):
         await database.initialize({})
 
@@ -84,7 +84,7 @@ async def test_cancellation_waits_for_database_commit(database):
 async def test_commands_and_authorization(config, database):
     commands = Commands(config, database)
     assert await commands.handle(PARENT + "/phone", "!ping") == "Га-Га-Га!"
-    assert "диагностическом" in await commands.handle(CHILD, "!help")
+    assert "!context clear" in await commands.handle(CHILD, "!help")
     assert await commands.handle(CHILD, "обычный текст") is None
     assert await commands.handle("unknown@example.org", "!ping") is None
     assert "владельцу" in await commands.handle(CHILD, f"!admin user show {OTHER}")

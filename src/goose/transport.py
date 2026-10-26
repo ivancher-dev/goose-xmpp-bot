@@ -16,6 +16,8 @@ from slixmpp.xmlstream.matcher import MatchXPath
 
 from .commands import Commands
 from .config import ConfigError, bare_jid
+from .dialogue import Dialogues
+from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
 
@@ -110,6 +112,7 @@ class GooseClient(ClientXMPP):
         self.fatal = False
         self.failure_reason = None
         self.manager = None
+        self.dialogues = None
         self.start_task = None
         self.features = {"carbons": "не проверено", "mam": "не проверено"}
         self.queue = asyncio.Queue(maxsize=64)
@@ -195,6 +198,10 @@ class GooseClient(ClientXMPP):
                     self.on_initialization_failure(None)
                     raise
                 if self.serving_commands:
+                    model = OpenAICompatible(self.config.llm) if self.config.llm.enabled else None
+                    self.dialogues = Dialogues(self.config, self.database, model, self.prepare_reply)
+                    await self.dialogues.initialize()
+                    self.commands.dialogues = self.dialogues
                     self.worker = asyncio.create_task(self.process_queue())
             self.ready.set()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
@@ -207,9 +214,10 @@ class GooseClient(ClientXMPP):
             self.ended.set()
 
     def status(self):
-        return (f"Этап 1; соединение={self.ready.is_set()}; OMEMO=legacy, manual trust; "
+        return (f"Этап 2; соединение={self.ready.is_set()}; OMEMO=legacy, manual trust; "
                 f"Carbons={self.features['carbons']}; MAM={self.features['mam']}; "
-                "архив не запускает команды; модель и расписание отключены.")
+                f"модель={'включена' if self.config.llm.enabled else 'отключена'}; "
+                "архив не запускает команды; расписание отключено; пауза через !admin mode.")
 
     def admit(self, stanza):
         if not self.ready.is_set() or len(ET.tostring(stanza.xml)) > 65536:
@@ -260,23 +268,38 @@ class GooseClient(ClientXMPP):
                 return
             reply = await self.commands.handle(sender, body)
             if reply is None:
+                if self.dialogues:
+                    await self.dialogues.submit(sender, body)
                 return
-            outgoing = self.make_message(mto=sender, mtype="chat", mbody=reply)
-            outgoing["from"] = self.boundjid
-            encrypted, errors = await plugin.encrypt_message(outgoing, {JID(sender)})
-            if errors or encrypted is None or LEGACY_NS not in plugin.is_encrypted(encrypted):
-                log.warning("reply_blocked reason=encryption_failed")
-                return
-            # EME соответствует реально поддержанной версии протокола.
-            encrypted["eme"]["namespace"] = LEGACY_NS
-            encrypted["eme"]["name"] = "OMEMO"
-            if self.ready.is_set():
-                encrypted.send()
-                log.info("reply_queued")
+            send = await self.prepare_reply(sender, reply)
+            if send:
+                send()
         except ManualTrustRequired:
             log.warning("reply_blocked reason=manual_trust_required")
         except Exception:
             log.warning("reply_blocked reason=omemo_or_command_failure")
+
+    async def prepare_reply(self, sender, reply):
+        plugin = self.plugin["xep_0384"]
+        outgoing = self.make_message(mto=sender, mtype="chat", mbody=reply)
+        outgoing["from"] = self.boundjid
+        try:
+            encrypted, errors = await plugin.encrypt_message(outgoing, {JID(sender)})
+        except ManualTrustRequired:
+            log.warning("reply_blocked reason=manual_trust_required")
+            return None
+        if errors or encrypted is None or LEGACY_NS not in plugin.is_encrypted(encrypted):
+            log.warning("reply_blocked reason=encryption_failed")
+            return None
+        encrypted["eme"]["namespace"] = LEGACY_NS
+        encrypted["eme"]["name"] = "OMEMO"
+        def send():
+            if not self.ready.is_set():
+                return False
+            encrypted.send()
+            log.info("reply_queued")
+            return True
+        return send
 
     async def close(self):
         self.ready.clear()
@@ -286,6 +309,8 @@ class GooseClient(ClientXMPP):
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+        if self.dialogues:
+            await self.dialogues.close()
         if not self.probe:
             await self.plugin["xep_0384"].aclose()
         with suppress(Exception):
