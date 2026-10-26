@@ -56,7 +56,7 @@ def doctor(config):
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
             schema = db.execute("PRAGMA user_version").fetchone()[0]
-            if schema not in (1, 2):
+            if schema not in (1, 2, 3):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
@@ -65,6 +65,9 @@ def doctor(config):
     else:
         print("SQLite: ещё не создана; идентичность создаст первый запуск сервиса.")
     print("Модель: " + ("включена; auto подтверждается владельцем" if config.llm.enabled else "отключена"))
+    print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
+          "; новости: " + ("включены" if config.news.enabled else "отключены") +
+          ". Локальная проверка не обращается к источникам.")
     if config.llm.enabled:
         read_persona(config.llm.persona_file)
         print("Образ Гуся: файл корректен; ключ API: " +

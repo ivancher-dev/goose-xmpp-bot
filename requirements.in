@@ -2,4 +2,5 @@
 slixmpp==1.17.0
 slixmpp-omemo==2.2.0
 httpx==0.28.1
+defusedxml==0.7.1
 setuptools==80.9.0

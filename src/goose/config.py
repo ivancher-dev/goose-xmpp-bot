@@ -96,6 +96,26 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class WeatherConfig:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
+class NewsSource:
+    key: str
+    name: str
+    url: str
+
+
+@dataclass(frozen=True)
+class NewsConfig:
+    enabled: bool = False
+    sources: tuple[NewsSource, ...] = ()
+    limit: int = 5
+    max_age_hours: int = 48
+
+
+@dataclass(frozen=True)
 class Config:
     jid: str
     resource: str
@@ -111,6 +131,8 @@ class Config:
     connect_timeout: int
     llm: LlmConfig = LlmConfig()
     memory: MemoryConfig = MemoryConfig()
+    weather: WeatherConfig = WeatherConfig()
+    news: NewsConfig = NewsConfig()
 
     def password(self) -> str:
         value = os.environ.get(self.password_env, "")
@@ -126,7 +148,7 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("Не удалось прочитать TOML-конфигурацию.") from exc
     allowed_top = {"config_version", "timezone", "data_dir", "xmpp", "access", "runtime",
-                   "diagnostics", "users", "llm", "memory", "schedule"}
+                   "diagnostics", "users", "llm", "memory", "schedule", "weather", "news"}
     if data.keys() - allowed_top or type(data.get("config_version")) is not int or data["config_version"] != 1:
         raise ConfigError("Неизвестные поля или неподдерживаемая config_version.")
     timezone = text(data, "timezone")
@@ -263,5 +285,35 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     memory_config = MemoryConfig(limited(memory, "recent_messages", 24, 100),
                                  limited(memory, "context_token_budget", 6000, 65536, 256),
                                  limited(memory, "retention_days", 30, 365))
+    weather = table(data, "weather", {"enabled"})
+    weather_config = WeatherConfig(typed(weather, "enabled", bool, False))
+    news = table(data, "news", {"enabled", "sources", "limit", "max_age_hours"})
+    enabled_news = typed(news, "enabled", bool, False)
+    sources = news.get("sources", {})
+    if not isinstance(sources, dict) or len(sources) > 8:
+        raise ConfigError("news.sources: требуется не более 8 именованных источников.")
+    parsed_sources = []
+    for key in sources:
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", key):
+            raise ConfigError("news.sources: некорректный идентификатор источника.")
+        source = table(sources, key, {"name", "url"}, {"name", "url"})
+        name, url = text(source, "name"), text(source, "url")
+        try:
+            address = urlsplit(url)
+            valid = (address.scheme == "https" and address.hostname
+                     and not any(ord(c) <= 32 for c in url) and not address.username
+                     and not address.password and not address.query and not address.fragment)
+            address.port
+        except ValueError:
+            valid = False
+        if not valid or len(url) > 512 or len(name) > 64:
+            raise ConfigError("news.sources: нужны имя до 64 символов и HTTPS URL без секретов/query.")
+        parsed_sources.append(NewsSource(key, name, url))
+    if enabled_news and not parsed_sources:
+        raise ConfigError("news.sources: для новостей задайте хотя бы один источник.")
+    news_config = NewsConfig(enabled_news, tuple(parsed_sources),
+                             limited(news, "limit", 5, 10),
+                             limited(news, "max_age_hours", 48, 168))
     return Config(jid, resource, password_env, data_dir, timezone, admins, allowed,
-                  profiles, echo, level, attempts, timeout, llm_config, memory_config)
+                  profiles, echo, level, attempts, timeout, llm_config, memory_config,
+                  weather_config, news_config)

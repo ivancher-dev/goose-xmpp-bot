@@ -44,6 +44,19 @@ recent_messages = 24
 context_token_budget = 6000
 retention_days = 30
 
+[weather]
+enabled = false
+# Свой город задаётся в чате командой !weather city <название>.
+
+[news]
+enabled = false
+limit = 5
+max_age_hours = 48
+
+[news.sources.ria]
+name = "РИА Новости"
+url = "https://ria.ru/export/rss2/archive/index.xml"
+
 [schedule]
 enabled = false
 # Будущий машиночитаемый источник. URL действующего API не подтверждён.

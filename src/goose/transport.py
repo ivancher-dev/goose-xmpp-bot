@@ -17,6 +17,7 @@ from slixmpp.xmlstream.matcher import MatchXPath
 from .commands import Commands
 from .config import ConfigError, bare_jid
 from .dialogue import Dialogues
+from .facts import Facts
 from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
@@ -113,6 +114,7 @@ class GooseClient(ClientXMPP):
         self.failure_reason = None
         self.manager = None
         self.dialogues = None
+        self.facts = None
         self.start_task = None
         self.features = {"carbons": "не проверено", "mam": "не проверено"}
         self.queue = asyncio.Queue(maxsize=64)
@@ -202,6 +204,8 @@ class GooseClient(ClientXMPP):
                     self.dialogues = Dialogues(self.config, self.database, model, self.prepare_reply)
                     await self.dialogues.initialize()
                     self.commands.dialogues = self.dialogues
+                    self.facts = Facts(self.config, self.database, self.prepare_reply)
+                    self.commands.facts = self.facts
                     self.worker = asyncio.create_task(self.process_queue())
             self.ready.set()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
@@ -217,6 +221,7 @@ class GooseClient(ClientXMPP):
         return (f"Этап 2; соединение={self.ready.is_set()}; OMEMO=legacy, manual trust; "
                 f"Carbons={self.features['carbons']}; MAM={self.features['mam']}; "
                 f"модель={'включена' if self.config.llm.enabled else 'отключена'}; "
+                f"погода={self.config.weather.enabled}; новости={self.config.news.enabled}; "
                 "архив не запускает команды; расписание отключено; пауза через !admin mode.")
 
     def admit(self, stanza):
@@ -266,6 +271,8 @@ class GooseClient(ClientXMPP):
             body = decrypted["body"]
             if not body or len(body) > 2048:
                 return
+            if self.facts and self.facts.submit(sender, body):
+                return
             reply = await self.commands.handle(sender, body)
             if reply is None:
                 if self.dialogues:
@@ -311,6 +318,8 @@ class GooseClient(ClientXMPP):
                     await task
         if self.dialogues:
             await self.dialogues.close()
+        if self.facts:
+            await self.facts.close()
         if not self.probe:
             await self.plugin["xep_0384"].aclose()
         with suppress(Exception):
