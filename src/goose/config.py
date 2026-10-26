@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import tomllib
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from slixmpp import JID
@@ -67,6 +68,34 @@ def text(data, name, default=None):
 
 
 @dataclass(frozen=True)
+class LlmConfig:
+    enabled: bool = False
+    provider: str = "openai_compatible"
+    base_url: str = ""
+    model: str = ""
+    api_key_env: str = "GOOSE_LLM_API_KEY"
+    persona_file: Path = Path("/etc/goose-xmpp-bot/persona.md")
+    timeout_seconds: int = 30
+    max_output_tokens: int = 700
+    max_concurrent_requests: int = 2
+    requests_per_minute: int = 12
+    max_attempts: int = 2
+
+    def key(self):
+        value = os.environ.get(self.api_key_env, "")
+        if not value:
+            raise ConfigError("Ключ API модели не задан в настроенной переменной окружения.")
+        return value
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    recent_messages: int = 24
+    context_token_budget: int = 6000
+    retention_days: int = 30
+
+
+@dataclass(frozen=True)
 class Config:
     jid: str
     resource: str
@@ -80,6 +109,8 @@ class Config:
     log_level: str
     max_attempts: int
     connect_timeout: int
+    llm: LlmConfig = LlmConfig()
+    memory: MemoryConfig = MemoryConfig()
 
     def password(self) -> str:
         value = os.environ.get(self.password_env, "")
@@ -155,7 +186,7 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
         raise ConfigError("Администраторы должны входить в allowlist; аккаунт бота — исключён.")
     runtime = table(data, "runtime", {"default_mode", "log_level", "max_attempts", "connect_timeout"})
     if runtime.get("default_mode", "manual") != "manual":
-        raise ConfigError("На этапе 1 поддерживается только manual.")
+        raise ConfigError("Новый диалог создаётся только в manual; auto включает владелец.")
     level = text(runtime, "log_level", "INFO")
     if level not in {"INFO", "WARNING", "ERROR"}:
         raise ConfigError("log_level: допустимы INFO, WARNING, ERROR; DEBUG раскрывает XML.")
@@ -175,22 +206,62 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
         if not isinstance(value, dict) or value.keys() != fields:
             raise ConfigError("users: требуется полный профиль с известными полями.")
         profiles[normalized] = {f: profile_value(f, v) for f, v in value.items()}
-    # Поля следующих этапов проверяются, но активация функций запрещена.
+    # Расписание остаётся неактивной настройкой следующего этапа.
     llm = table(data, "llm", {"enabled", "provider", "base_url", "model", "api_key_env",
-                              "timeout_seconds", "max_output_tokens", "max_concurrent_requests"})
+                              "timeout_seconds", "max_output_tokens", "max_concurrent_requests",
+                              "persona_file", "requests_per_minute", "max_attempts"})
     schedule = table(data, "schedule", {"enabled", "source_url", "timeout_seconds"})
     memory = table(data, "memory", {"recent_messages", "context_token_budget", "retention_days"})
-    for section in (llm, schedule):
-        if typed(section, "enabled", bool, False):
-            raise ConfigError("Модель и расписание не реализованы на этапе 1.")
+    if typed(schedule, "enabled", bool, False):
+        raise ConfigError("Расписание не реализовано на этапе 2.")
     for section in (llm, schedule, memory):
         for key, value in section.items():
             if key == "enabled":
                 continue
-            if key in {"provider", "base_url", "model", "api_key_env", "source_url"}:
+            if key in {"provider", "base_url", "model", "api_key_env", "source_url", "persona_file"}:
                 if type(value) is not str:
                     raise ConfigError(f"{key}: требуется строка.")
             elif type(value) is not int or value <= 0:
                 raise ConfigError(f"{key}: требуется положительное целое число.")
+    def limited(section, name, default, maximum, minimum=1):
+        value = typed(section, name, int, default)
+        if not minimum <= value <= maximum:
+            raise ConfigError(f"{name}: значение вне допустимого диапазона.")
+        return value
+
+    enabled = typed(llm, "enabled", bool, False)
+    provider = text(llm, "provider", "openai_compatible")
+    base_url = typed(llm, "base_url", str, "")
+    model = typed(llm, "model", str, "")
+    api_env = text(llm, "api_key_env", "GOOSE_LLM_API_KEY")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_env):
+        raise ConfigError("api_key_env: некорректное имя переменной.")
+    persona_file = Path(text(llm, "persona_file", str(path.resolve().parent / "persona.md")))
+    if not persona_file.is_absolute():
+        raise ConfigError("persona_file: требуется абсолютный путь.")
+    if enabled:
+        try:
+            address = urlsplit(base_url)
+            valid_url = (not any(ord(c) <= 32 for c in base_url)
+                         and address.scheme == "https" and address.hostname and not address.username
+                         and not address.password and not address.query and not address.fragment)
+            address.port
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise ConfigError("base_url: требуется HTTPS-адрес API без учётных данных и query.")
+        if provider != "openai_compatible":
+            raise ConfigError("Поддерживается только адаптер openai_compatible.")
+        if not model.strip() or len(model) > 128 or any(ord(c) < 32 for c in model):
+            raise ConfigError("model: требуется непустой идентификатор модели до 128 символов.")
+    llm_config = LlmConfig(enabled, provider, base_url.rstrip("/"), model, api_env, persona_file,
+                           limited(llm, "timeout_seconds", 30, 120),
+                           limited(llm, "max_output_tokens", 700, 4096),
+                           limited(llm, "max_concurrent_requests", 2, 8),
+                           limited(llm, "requests_per_minute", 12, 120),
+                           limited(llm, "max_attempts", 2, 3))
+    memory_config = MemoryConfig(limited(memory, "recent_messages", 24, 100),
+                                 limited(memory, "context_token_budget", 6000, 65536, 256),
+                                 limited(memory, "retention_days", 30, 365))
     return Config(jid, resource, password_env, data_dir, timezone, admins, allowed,
-                  profiles, echo, level, attempts, timeout)
+                  profiles, echo, level, attempts, timeout, llm_config, memory_config)

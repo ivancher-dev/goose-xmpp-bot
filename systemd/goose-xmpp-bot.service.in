@@ -1,5 +1,5 @@
 [Unit]
-Description=Гусь: диагностический XMPP-сервис
+Description=Гусь: семейный XMPP-помощник
 After=network-online.target
 Wants=network-online.target
 # Ошибка после ограниченных попыток требует вмешательства владельца.

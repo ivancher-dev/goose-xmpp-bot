@@ -137,3 +137,26 @@ def test_cwd_real_git_directory_still_protects_data(config_file, tmp_path, monke
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ConfigError, match="вне исходников"):
         load_config(config_file)
+
+
+@pytest.mark.parametrize("old,new", [
+    ('base_url = ""', 'base_url = "http://api.example.org/v1"'),
+    ('base_url = ""', 'base_url = "https://user:password@api.example.org/v1"'),
+    ('base_url = ""', 'base_url = "https://api.example.org/v1?token=private"'),
+    ('model = ""', 'model = ""'),
+    ('provider = "openai_compatible"', 'provider = "unknown"'),
+    ('api_key_env = "GOOSE_LLM_API_KEY"', 'api_key_env = "bad-name"'),
+    ('max_concurrent_requests = 2', 'max_concurrent_requests = 100'),
+    ('requests_per_minute = 12', 'requests_per_minute = 0'),
+    ('persona_file = "/etc/goose-xmpp-bot/persona.md"', 'persona_file = "relative.md"'),
+])
+def test_model_configuration_constraints(config_file, old, new):
+    content = config_file.read_text().replace('[llm]\nenabled = false', '[llm]\nenabled = true')
+    content = content.replace(old, new)
+    if old != 'base_url = ""':
+        content = content.replace('base_url = ""', 'base_url = "https://api.example.org/v1"')
+    if old != 'model = ""':
+        content = content.replace('model = ""', 'model = "fixture-model"')
+    config_file.write_text(content)
+    with pytest.raises(ConfigError):
+        load_config(config_file)

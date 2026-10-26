@@ -49,12 +49,14 @@ class Database:
     def _call(self, operation):
         with sqlite3.connect(self.path, timeout=10) as db:
             db.row_factory = sqlite3.Row
+            db.execute("PRAGMA secure_delete=ON")
+            db.execute("BEGIN")
             return operation(db)
 
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -66,10 +68,20 @@ class Database:
                 schedule_class_id TEXT NOT NULL, explanation_style TEXT NOT NULL)""")
             db.execute("CREATE TABLE IF NOT EXISTS omemo (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS seen (key TEXT PRIMARY KEY, expires REAL NOT NULL)")
+            db.execute("""CREATE TABLE IF NOT EXISTS dialogues (
+                jid TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'manual',
+                revision INTEGER NOT NULL DEFAULT 0, suspended INTEGER NOT NULL DEFAULT 0,
+                next_turn INTEGER NOT NULL DEFAULT 0,
+                CHECK(mode IN ('manual', 'auto')))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS history (
+                jid TEXT NOT NULL, turn INTEGER NOT NULL, role TEXT NOT NULL,
+                body TEXT NOT NULL, created REAL NOT NULL,
+                PRIMARY KEY(jid, turn, role), CHECK(role IN ('user', 'assistant')))""")
+            db.execute("CREATE INDEX IF NOT EXISTS history_created ON history(created)")
             for jid, fields in profiles.items():
                 db.execute("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)",
                            (jid, fields["grade"], fields["academic_year"], fields["schedule_class_id"], fields["explanation_style"]))
-            db.execute("PRAGMA user_version=1")
+            db.execute("PRAGMA user_version=2")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
@@ -82,7 +94,12 @@ class Database:
             raise ConfigError("Изменение этого поля запрещено.")
         profile_value(field, value)
         # Имя столбца ограничено константным набором выше; значения параметризованы.
-        count = await self.call(lambda db: db.execute(f"UPDATE profiles SET {field}=? WHERE jid=?", (value, jid)).rowcount)
+        def update(db):
+            count = db.execute(f"UPDATE profiles SET {field}=? WHERE jid=?", (value, jid)).rowcount
+            if count == 1:
+                db.execute("UPDATE dialogues SET revision=revision+1 WHERE jid=?", (jid,))
+            return count
+        count = await self.call(update)
         if count != 1:
             raise ConfigError("Профиль не найден.")
 
@@ -95,6 +112,59 @@ class Database:
             db.execute("DELETE FROM seen WHERE key IN (SELECT key FROM seen ORDER BY expires DESC LIMIT -1 OFFSET 10000)")
             return bool(inserted)
         return await self.call(claim)
+
+    async def dialogue(self, jid):
+        def read(db):
+            db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
+            return dict(db.execute("SELECT * FROM dialogues WHERE jid=?", (jid,)).fetchone())
+        return await self.call(read)
+
+    async def set_mode(self, jid, mode):
+        if mode not in {"manual", "auto"}:
+            raise ConfigError("Режим: manual или auto.")
+        def update(db):
+            db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
+            db.execute("UPDATE dialogues SET mode=?, suspended=0, revision=revision+1 WHERE jid=?", (mode, jid))
+        await self.call(update)
+
+    async def suspend_auto(self):
+        # До этапа 3 нет MAM-синхронизации ручных сообщений после отсутствия бота.
+        await self.call(lambda db: db.execute(
+            "UPDATE dialogues SET suspended=1, revision=revision+1 WHERE mode='auto'"))
+
+    async def clear_context(self, jid):
+        def clear(db):
+            db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
+            db.execute("UPDATE dialogues SET revision=revision+1 WHERE jid=?", (jid,))
+            db.execute("DELETE FROM history WHERE jid=?", (jid,))
+        await self.call(clear)
+
+    async def add_user_message(self, jid, body):
+        def insert(db):
+            db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
+            db.execute("UPDATE dialogues SET next_turn=next_turn+1 WHERE jid=?", (jid,))
+            turn = db.execute("SELECT next_turn FROM dialogues WHERE jid=?", (jid,)).fetchone()[0]
+            db.execute("INSERT INTO history VALUES (?, ?, 'user', ?, ?)", (jid, turn, body, time.time()))
+            # Не более 500 ходов на диалог; окно API и срок хранения ограничены отдельно.
+            db.execute("""DELETE FROM history WHERE jid=? AND turn NOT IN
+                (SELECT DISTINCT turn FROM history WHERE jid=? ORDER BY turn DESC LIMIT 500)""", (jid, jid))
+            return turn
+        return await self.call(insert)
+
+    async def add_assistant_message(self, jid, turn, body):
+        await self.call(lambda db: db.execute(
+            "INSERT INTO history VALUES (?, ?, 'assistant', ?, ?)", (jid, turn, body, time.time())))
+
+    async def history(self, jid, turn, limit, retention_days):
+        cutoff = time.time() - retention_days * 86400
+        rows = await self.call(lambda db: db.execute(
+            """SELECT role, body FROM history WHERE jid=? AND turn<=? AND created>?
+               ORDER BY turn DESC, role ASC LIMIT ?""", (jid, turn, cutoff, limit)).fetchall())
+        return [{"role": row["role"], "content": row["body"]} for row in reversed(rows)]
+
+    async def expire_history(self, retention_days):
+        cutoff = time.time() - retention_days * 86400
+        await self.call(lambda db: db.execute("DELETE FROM history WHERE created<=?", (cutoff,)))
 
 
 class OmemoStorage(Storage):

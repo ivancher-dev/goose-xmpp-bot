@@ -89,7 +89,11 @@ if not config.exists():
         f.write(content)
 if not env.exists():
     with env.open('x') as f:
-        f.write('# Заполните пароль отдельного тестового аккаунта; не добавляйте файл в Git.\nGOOSE_XMPP_PASSWORD=\n')
+        f.write('# Секреты задаются только локально; не добавляйте файл в Git.\nGOOSE_XMPP_PASSWORD=\nGOOSE_LLM_API_KEY=\n')
+persona = config.parent / 'persona.md'
+if not persona.exists():
+    with persona.open('x') as f:
+        f.write((source / 'config/persona.example.md').read_text())
 unit = (source / 'systemd/goose-xmpp-bot.service.in').read_text()
 for key, value in {'PREFIX': prefix, 'CONFIG': config, 'DATA_DIR': data, 'ENV_FILE': env}.items():
     unit = unit.replace(f'@{key}@', str(value))
@@ -106,8 +110,9 @@ PY
 if ! $local_install; then
     chmod -R a+rX "$prefix/venv"
     chown goose-xmpp-bot:goose-xmpp-bot "$data_dir"
-    chown root:goose-xmpp-bot "$config" "$env_file"
-    chmod 640 "$config" "$env_file"
+    persona_file="$(dirname -- "$config")/persona.md"
+    chown root:goose-xmpp-bot "$config" "$env_file" "$persona_file"
+    chmod 640 "$config" "$env_file" "$persona_file"
     install -m 644 "$prefix/goose-xmpp-bot.service" /etc/systemd/system/goose-xmpp-bot.service
     systemctl daemon-reload
 fi
