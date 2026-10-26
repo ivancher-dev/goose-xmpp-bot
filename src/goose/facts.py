@@ -188,6 +188,37 @@ def wttr_number(value, low, high):
     return number(value, low, high)
 
 
+def wttr_observation(current, forecast, zone, now):
+    dated = current.get("localObsDateTime") not in (None, "")
+    stamp = None
+    if dated:
+        for pattern in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M"):
+            try:
+                stamp = datetime.strptime(current["localObsDateTime"], pattern).replace(tzinfo=zone)
+                break
+            except ValueError:
+                continue
+    else:
+        # В части ответов WWO есть только UTC-время без даты. Не выдаём
+        # дату ближайшего прошедшего времени за дату, полученную от источника.
+        today = now.astimezone(zone).date()
+        first = min(datetime.strptime(day["date"], "%Y-%m-%d").date() for day in forecast)
+        if first != today:
+            raise ValueError
+        for pattern in ("%I:%M %p", "%H:%M"):
+            try:
+                observed = datetime.strptime(current["observation_time"], pattern).time()
+                stamp = datetime.combine(now.astimezone(timezone.utc).date(), observed, timezone.utc)
+                if stamp > now:
+                    stamp -= timedelta(days=1)
+                break
+            except ValueError:
+                continue
+    if stamp is None or abs((now - stamp).total_seconds()) > 10800:
+        raise ValueError
+    return stamp.astimezone(zone), dated
+
+
 def wttr_weather_text(data, place, tomorrow, now):
     zone = ZoneInfo(place["timezone"])
     area = data["nearest_area"][0]
@@ -198,15 +229,7 @@ def wttr_weather_text(data, place, tomorrow, now):
     if 12742 * math.asin(math.sqrt(min(1, haversine))) > 250:
         raise ValueError
     current = data["current_condition"][0]
-    stamp = None
-    for pattern in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M"):
-        try:
-            stamp = datetime.strptime(current["localObsDateTime"], pattern).replace(tzinfo=zone)
-            break
-        except ValueError:
-            continue
-    if stamp is None or abs((now - stamp).total_seconds()) > 10800:
-        raise ValueError
+    stamp, dated = wttr_observation(current, data["weather"], zone, now)
     day = (now.astimezone(zone) + timedelta(days=int(tomorrow))).date().isoformat()
     daily = next((entry for entry in data["weather"] if entry["date"] == day), None)
     if daily is None:
@@ -236,6 +259,8 @@ def wttr_weather_text(data, place, tomorrow, now):
         wind = wttr_number(current["windspeedKmph"], 0, 500)
         lines.append(f"На {stamp:%H:%M}: {summary(current)}, {temp:g} °C, "
                      f"ощущается как {feels:g} °C; ветер {wind:g} км/ч.")
+        if not dated:
+            lines.append("Дата наблюдения не указана источником.")
     lines.append(f"Прогноз: от {minimum:g} до {maximum:g} °C. "
                  f"На {minutes // 60:02d}:{minutes % 60:02d}: {summary(representative)}.")
     lines.append(f"Вероятность дождя по интервалам прогноза: до {rain:g}%.")

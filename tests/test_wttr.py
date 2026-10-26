@@ -47,6 +47,64 @@ def test_new_york_date_is_local_and_hourly_slot_is_not_presented_as_whole_day():
     assert "завтра, 2026-10-27 (America/New_York)" in result and "На 00:00: Cloudy" in result
 
 
+def time_only_payload(observed="11:00 AM"):
+    data = payload()
+    del data["current_condition"][0]["localObsDateTime"]
+    data["current_condition"][0]["observation_time"] = observed
+    return data
+
+
+@pytest.mark.parametrize("optional", ["absent", None, ""])
+def test_missing_optional_local_date_uses_utc_time_and_discloses_unknown_date(optional):
+    data = time_only_payload()
+    if optional != "absent":
+        data["current_condition"][0]["localObsDateTime"] = optional
+    result = wttr_weather_text(data, PLACE, False, NOW)
+    assert "На 14:00: Пасмурно, 10 °C" in result  # 11:00 UTC, не 11:00 местного времени
+    assert "Дата наблюдения не указана источником." in result
+    tomorrow = wttr_weather_text(data, PLACE, True, NOW)
+    assert "завтра, 2026-10-27" in tomorrow and "На 14:00" not in tomorrow
+
+
+def test_utc_time_without_date_rolls_over_utc_midnight():
+    data = time_only_payload("11:00 PM")
+    data["weather"][0]["date"], data["weather"][1]["date"] = "2026-10-27", "2026-10-28"
+    result = wttr_weather_text(data, PLACE, False, datetime(2026, 10, 27, 0, 30, tzinfo=timezone.utc))
+    assert "сегодня, 2026-10-27 (Europe/Moscow)" in result and "На 02:00" in result
+
+
+def test_date_free_utc_observation_uses_the_chosen_city_timezone():
+    data = time_only_payload("12:30 AM")
+    result = wttr_weather_text(data, {**PLACE, "timezone": "America/New_York"}, False,
+                               datetime(2026, 10, 27, 1, tzinfo=timezone.utc))
+    assert "сегодня, 2026-10-26 (America/New_York)" in result and "На 20:30" in result
+
+
+@pytest.mark.parametrize("failure", ["stale-hour", "future-hour", "old-forecast", "missing-clock", "bad-clock"])
+def test_date_free_observation_still_rejects_invalid_or_stale_data(failure):
+    data = time_only_payload()
+    if failure == "stale-hour":
+        data["current_condition"][0]["observation_time"] = "06:00 AM"
+    elif failure == "future-hour":
+        data["current_condition"][0]["observation_time"] = "01:00 PM"
+    elif failure == "old-forecast":
+        data["weather"][0]["date"] = "2026-10-25"
+    elif failure == "missing-clock":
+        del data["current_condition"][0]["observation_time"]
+    else:
+        data["current_condition"][0]["observation_time"] = "25:61"
+    with pytest.raises((ValueError, KeyError)):
+        wttr_weather_text(data, PLACE, False, NOW)
+
+
+@pytest.mark.parametrize("local_date", ["2026-10-25 03:00 PM", "not-a-date"])
+def test_stale_dated_observation_cannot_be_hidden_by_recent_time_only_field(local_date):
+    data = time_only_payload()
+    data["current_condition"][0]["localObsDateTime"] = local_date
+    with pytest.raises(ValueError):
+        wttr_weather_text(data, PLACE, False, NOW)
+
+
 @pytest.mark.parametrize("failure", ["old", "future", "missing-observation", "missing-day", "bad-number",
     "bad-wind", "empty-hourly", "bad-hour", "wrong-location", "no-timezone", "malformed-root"])
 def test_unusable_data_is_rejected_without_invented_weather(failure):
@@ -77,7 +135,8 @@ def test_unusable_data_is_rejected_without_invented_weather(failure):
         wttr_weather_text(data, place, False, NOW)
 
 
-async def test_old_saved_city_is_enriched_without_changing_preferences(config, database):
+@pytest.mark.parametrize("has_local_date", [True, False])
+async def test_old_saved_city_is_enriched_without_changing_preferences(config, database, has_local_date):
     old = {key: value for key, value in PLACE.items() if key != "timezone"}
     await database.set_weather_location(PARENT, old)
     calls = []
@@ -88,7 +147,7 @@ async def test_old_saved_city_is_enriched_without_changing_preferences(config, d
             return httpx.Response(200, json=PLACE)
         assert request.url.host == "wttr.in" and request.url.path == "/55.000000,37.000000"
         assert dict(request.url.params) == {"format": "j1", "lang": "ru"}
-        return httpx.Response(200, json=payload())
+        return httpx.Response(200, json=payload() if has_local_date else time_only_payload())
     config = replace(config, weather=WeatherConfig(True, "wttr"))
     engine = Facts(config, database, None, transport=httpx.MockTransport(route), now=lambda: NOW)
     try:
