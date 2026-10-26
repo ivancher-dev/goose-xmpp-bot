@@ -20,6 +20,7 @@ import httpx
 
 from .config import bare_jid
 from . import __version__
+from .weather_view import Forecast, Observation, WWO_CONDITIONS, render_weather
 
 log = logging.getLogger("goose")
 GEO = "https://geocoding-api.open-meteo.com/v1/"
@@ -143,7 +144,7 @@ def condition(code):
               ({66, 67}, "ледяной дождь"), ({71, 73, 75, 77}, "снег"),
               ({80, 81, 82}, "ливень"), ({85, 86}, "снежный ливень"),
               ({95}, "гроза"), ({96, 99}, "гроза с градом"))
-    return next((label for codes, label in groups if code in codes), f"код погоды {code}")
+    return next((label for codes, label in groups if code in codes), "описание погоды недоступно")
 
 
 def weather_text(data, place, tomorrow, now):
@@ -160,7 +161,12 @@ def weather_text(data, place, tomorrow, now):
     maximum = number(daily["temperature_2m_max"][idx], minimum, 70)
     rain = number(daily["precipitation_probability_max"][idx], 0, 100)
     summary = condition(daily["weather_code"][idx])
-    lines = [f"{place_name(place)} — {'завтра' if tomorrow else 'сегодня'}, {day} ({zone.key})."]
+    forecast_wind = None
+    if "wind_speed_10m_max" in daily and daily["wind_speed_10m_max"][idx] is not None:
+        if units.get("wind_speed_10m_max") != "km/h":
+            raise ValueError
+        forecast_wind = number(daily["wind_speed_10m_max"][idx], 0, 500) / 3.6
+    observation = None
     if not tomorrow:
         current, current_units = data["current"], data["current_units"]
         if (current_units.get("temperature_2m") != "°C" or current_units.get("apparent_temperature") != "°C"
@@ -172,11 +178,10 @@ def weather_text(data, place, tomorrow, now):
         temp = number(current["temperature_2m"], -100, 70)
         feels = number(current["apparent_temperature"], -120, 90)
         wind = number(current["wind_speed_10m"], 0, 500)
-        lines.append(f"На {stamp:%H:%M}: {condition(current['weather_code'])}, {temp:g} °C, "
-                     f"ощущается как {feels:g} °C; ветер {wind:g} км/ч.")
-    lines.append(f"Прогноз: {summary}; от {minimum:g} до {maximum:g} °C. Вероятность осадков: {rain:g}%.")
-    lines.append("Источник: Open-Meteo — https://open-meteo.com/")
-    return "\n".join(lines)
+        observation = Observation(stamp, condition(current["weather_code"]), temp, feels, wind / 3.6)
+    forecast = Forecast(summary, minimum, maximum, rain, "осадков", forecast_wind)
+    return render_weather(place_name(place), day, zone, forecast, source="Open-Meteo",
+                          source_url="https://open-meteo.com/", tomorrow=tomorrow, observation=observation)
 
 
 def wttr_number(value, low, high):
@@ -219,6 +224,22 @@ def wttr_observation(current, forecast, zone, now):
     return stamp.astimezone(zone), dated
 
 
+def wttr_condition(entry):
+    code = entry.get("weatherCode")
+    if isinstance(code, str) and code.isascii() and code.isdecimal():
+        code = int(code)
+    if type(code) is int and code in WWO_CONDITIONS:
+        return WWO_CONDITIONS[code]
+    values = entry.get("lang_ru") or []
+    if isinstance(values, list) and values and isinstance(values[0], dict):
+        value = values[0].get("value")
+        if isinstance(value, str):
+            text = plain(value, 100)
+            if re.search(r"[А-Яа-яЁё]", text) and not re.search(r"[A-Za-z]", text):
+                return text[0].lower() + text[1:]
+    return "описание погоды недоступно"
+
+
 def wttr_weather_text(data, place, tomorrow, now):
     zone = ZoneInfo(place["timezone"])
     area = data["nearest_area"][0]
@@ -246,26 +267,18 @@ def wttr_weather_text(data, place, tomorrow, now):
         raise ValueError
     minutes, representative = min(slots, key=lambda item: abs(item[0] - 720))
     rain = max(wttr_number(entry["chanceofrain"], 0, 100) for _, entry in slots)
-    def summary(entry):
-        values = entry.get("lang_ru") or entry["weatherDesc"]
-        result = plain(values[0]["value"], 100)
-        if not result:
-            raise ValueError
-        return result
-    lines = [f"{place_name(place)} — {'завтра' if tomorrow else 'сегодня'}, {day} ({zone.key})."]
+    forecast_wind = None
+    if all(entry.get("windspeedKmph") is not None for _, entry in slots):
+        forecast_wind = max(wttr_number(entry["windspeedKmph"], 0, 500) for _, entry in slots) / 3.6
+    observation = None
     if not tomorrow:
         temp = wttr_number(current["temp_C"], -100, 70)
         feels = wttr_number(current["FeelsLikeC"], -120, 90)
         wind = wttr_number(current["windspeedKmph"], 0, 500)
-        lines.append(f"На {stamp:%H:%M}: {summary(current)}, {temp:g} °C, "
-                     f"ощущается как {feels:g} °C; ветер {wind:g} км/ч.")
-        if not dated:
-            lines.append("Дата наблюдения не указана источником.")
-    lines.append(f"Прогноз: от {minimum:g} до {maximum:g} °C. "
-                 f"На {minutes // 60:02d}:{minutes % 60:02d}: {summary(representative)}.")
-    lines.append(f"Вероятность дождя по интервалам прогноза: до {rain:g}%.")
-    lines.append("Источник: wttr.in — https://wttr.in/")
-    return "\n".join(lines)
+        observation = Observation(stamp, wttr_condition(current), temp, feels, wind / 3.6, dated)
+    forecast = Forecast(wttr_condition(representative), minimum, maximum, rain, "дождя", forecast_wind, minutes)
+    return render_weather(place_name(place), day, zone, forecast, source="wttr.in",
+                          source_url="https://wttr.in/", tomorrow=tomorrow, observation=observation)
 
 
 @dataclass
@@ -450,7 +463,7 @@ class Facts:
         payload = await self.fetch(FORECAST, {
             "latitude": place["latitude"], "longitude": place["longitude"],
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
             "forecast_days": 2, "timezone": "auto", "temperature_unit": "celsius", "wind_speed_unit": "kmh"})
         return weather_text(json.loads(payload), place, tomorrow, self.now())
 

@@ -33,10 +33,10 @@ def forecast():
             "current_units": {"temperature_2m": "°C", "apparent_temperature": "°C",
                               "weather_code": "wmo code", "wind_speed_10m": "km/h"},
             "daily_units": {"temperature_2m_min": "°C", "temperature_2m_max": "°C",
-                            "weather_code": "wmo code", "precipitation_probability_max": "%"},
+                            "weather_code": "wmo code", "precipitation_probability_max": "%", "wind_speed_10m_max": "km/h"},
             "daily": {"time": ["2026-10-26", "2026-10-27"], "temperature_2m_min": [1, 0],
                       "temperature_2m_max": [6, 5], "weather_code": [3, 61],
-                      "precipitation_probability_max": [20, 70]}}
+                      "precipitation_probability_max": [20, 70], "wind_speed_10m_max": [18, 36]}}
 
 
 def rss(items):
@@ -93,7 +93,7 @@ async def test_city_is_per_jid_persistent_and_one_off_does_not_change_it(system,
     engine.submit(PARENT, "!weather")
     await idle(engine)
     assert "сохранён" in sent[0][1] and "4 °C" in sent[1][1]
-    assert "Europe/Moscow" in sent[1][1] and "Open-Meteo" in sent[1][1]
+    assert "UTC+03:00" in sent[1][1] and "Open-Meteo" in sent[1][1]
     assert await database.weather_location(CHILD) is None
     engine.submit(CHILD, "!weather")
     engine.submit(PARENT, "погода в Нью-Йорке")
@@ -146,7 +146,7 @@ def test_weather_rejects_stale_or_malformed_data(change):
 
 def test_tomorrow_uses_local_date_and_does_not_claim_current_weather():
     result = weather_text(forecast(), PLACE, True, NOW)
-    assert "завтра, 2026-10-27" in result and "70%" in result and "На 15:00" not in result
+    assert "завтра, 27.10.2026" in result and "70%" in result and "По данным на" not in result
 
 
 async def test_news_five_sorted_headlines_and_allowlisted_source_only(system):

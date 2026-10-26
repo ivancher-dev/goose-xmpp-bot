@@ -18,23 +18,24 @@ PLACE = {"id": 10, "name": "Город", "admin1": "Область", "country": 
 def payload():
     return {"nearest_area": [{"latitude": "55.0", "longitude": "37.0"}],
             "current_condition": [{"localObsDateTime": "2026-10-26 03:00 PM", "temp_C": "10",
-                "FeelsLikeC": "8", "windspeedKmph": "12", "weatherDesc": [{"value": "Overcast"}],
+                "FeelsLikeC": "8", "windspeedKmph": "12", "weatherCode": "122", "weatherDesc": [{"value": "Overcast"}],
                 "lang_ru": [{"value": "Пасмурно"}]}],
             "weather": [{"date": day, "mintempC": "5", "maxtempC": "12", "hourly": [
-                {"time": "0", "chanceofrain": "10", "weatherDesc": [{"value": "Cloudy"}]},
-                {"time": "1200", "chanceofrain": "60", "weatherDesc": [{"value": "Rain"}],
-                 "lang_ru": [{"value": "Дождь"}]}]} for day in ("2026-10-26", "2026-10-27")]}
+                {"time": "0", "chanceofrain": "10", "windspeedKmph": "18", "weatherCode": "119", "weatherDesc": [{"value": "Cloudy"}]},
+                {"time": "1200", "chanceofrain": "60", "windspeedKmph": "25.2", "weatherCode": "176", "weatherDesc": [{"value": "Patchy rain nearby"}]}]} for day in ("2026-10-26", "2026-10-27")]}
 
 
 def test_current_and_tomorrow_use_explicit_units_source_and_forecast_intervals():
     data = payload()
     current = wttr_weather_text(data, PLACE, False, NOW)
-    assert "На 15:00: Пасмурно, 10 °C, ощущается как 8 °C; ветер 12 км/ч" in current
-    assert "от 5 до 12 °C" in current and "На 12:00: Дождь" in current
-    assert "по интервалам прогноза: до 60%" in current and "Источник: wttr.in" in current
-    assert "Europe/Moscow" in current
+    assert "По данным на 15:00: пасмурно." in current
+    assert "Температура: +10 °C, ощущается как +8 °C." in current
+    assert "Ветер: 3,3 м/с." in current and "Ветер по прогнозу: до 7 м/с." in current
+    assert "от +5 до +12 °C" in current and "В 12:00: местами возможен дождь" in current
+    assert "по интервалам: до 60%" in current and "Источник: wttr.in" in current
+    assert "UTC+03:00" in current
     tomorrow = wttr_weather_text(data, PLACE, True, NOW)
-    assert "завтра, 2026-10-27" in tomorrow and "На 15:00" not in tomorrow
+    assert "завтра, 27.10.2026" in tomorrow and "По данным на" not in tomorrow
 
 
 def test_new_york_date_is_local_and_hourly_slot_is_not_presented_as_whole_day():
@@ -44,7 +45,7 @@ def test_new_york_date_is_local_and_hourly_slot_is_not_presented_as_whole_day():
     for day in data["weather"]:
         day["hourly"] = day["hourly"][:1]
     result = wttr_weather_text(data, place, True, datetime(2026, 10, 27, 1, tzinfo=timezone.utc))
-    assert "завтра, 2026-10-27 (America/New_York)" in result and "На 00:00: Cloudy" in result
+    assert "завтра, 27.10.2026" in result and "UTC−04:00" in result and "В 00:00: облачно" in result
 
 
 def time_only_payload(observed="11:00 AM"):
@@ -60,24 +61,24 @@ def test_missing_optional_local_date_uses_utc_time_and_discloses_unknown_date(op
     if optional != "absent":
         data["current_condition"][0]["localObsDateTime"] = optional
     result = wttr_weather_text(data, PLACE, False, NOW)
-    assert "На 14:00: Пасмурно, 10 °C" in result  # 11:00 UTC, не 11:00 местного времени
+    assert "По данным на 14:00: пасмурно." in result  # 11:00 UTC, не 11:00 местного времени
     assert "Дата наблюдения не указана источником." in result
     tomorrow = wttr_weather_text(data, PLACE, True, NOW)
-    assert "завтра, 2026-10-27" in tomorrow and "На 14:00" not in tomorrow
+    assert "завтра, 27.10.2026" in tomorrow and "По данным на" not in tomorrow
 
 
 def test_utc_time_without_date_rolls_over_utc_midnight():
     data = time_only_payload("11:00 PM")
     data["weather"][0]["date"], data["weather"][1]["date"] = "2026-10-27", "2026-10-28"
     result = wttr_weather_text(data, PLACE, False, datetime(2026, 10, 27, 0, 30, tzinfo=timezone.utc))
-    assert "сегодня, 2026-10-27 (Europe/Moscow)" in result and "На 02:00" in result
+    assert "сегодня, 27.10.2026" in result and "UTC+03:00" in result and "По данным на 02:00" in result
 
 
 def test_date_free_utc_observation_uses_the_chosen_city_timezone():
     data = time_only_payload("12:30 AM")
     result = wttr_weather_text(data, {**PLACE, "timezone": "America/New_York"}, False,
                                datetime(2026, 10, 27, 1, tzinfo=timezone.utc))
-    assert "сегодня, 2026-10-26 (America/New_York)" in result and "На 20:30" in result
+    assert "сегодня, 26.10.2026" in result and "UTC−04:00" in result and "По данным на 20:30" in result
 
 
 @pytest.mark.parametrize("failure", ["stale-hour", "future-hour", "old-forecast", "missing-clock", "bad-clock"])
