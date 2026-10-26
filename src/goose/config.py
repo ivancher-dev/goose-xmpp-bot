@@ -98,6 +98,7 @@ class MemoryConfig:
 @dataclass(frozen=True)
 class WeatherConfig:
     enabled: bool = False
+    provider: str = "open_meteo"
 
 
 @dataclass(frozen=True)
@@ -285,8 +286,11 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     memory_config = MemoryConfig(limited(memory, "recent_messages", 24, 100),
                                  limited(memory, "context_token_budget", 6000, 65536, 256),
                                  limited(memory, "retention_days", 30, 365))
-    weather = table(data, "weather", {"enabled"})
-    weather_config = WeatherConfig(typed(weather, "enabled", bool, False))
+    weather = table(data, "weather", {"enabled", "provider"})
+    weather_provider = text(weather, "provider", "open_meteo")
+    if weather_provider not in {"open_meteo", "wttr"}:
+        raise ConfigError("weather.provider: допустимы open_meteo и wttr.")
+    weather_config = WeatherConfig(typed(weather, "enabled", bool, False), weather_provider)
     news = table(data, "news", {"enabled", "sources", "limit", "max_age_hours"})
     enabled_news = typed(news, "enabled", bool, False)
     sources = news.get("sources", {})

@@ -1,0 +1,144 @@
+from copy import deepcopy
+from dataclasses import replace
+from datetime import datetime, timezone
+
+import httpx
+import pytest
+
+from goose.cli import doctor
+from goose.config import ConfigError, WeatherConfig, load_config
+from goose.facts import Facts, location, wttr_weather_text
+
+PARENT, CHILD = "parent@example.org", "pupil1@example.org"
+NOW = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+PLACE = {"id": 10, "name": "Город", "admin1": "Область", "country": "Страна",
+         "latitude": 55.0, "longitude": 37.0, "timezone": "Europe/Moscow"}
+
+
+def payload():
+    return {"nearest_area": [{"latitude": "55.0", "longitude": "37.0"}],
+            "current_condition": [{"localObsDateTime": "2026-10-26 03:00 PM", "temp_C": "10",
+                "FeelsLikeC": "8", "windspeedKmph": "12", "weatherDesc": [{"value": "Overcast"}],
+                "lang_ru": [{"value": "Пасмурно"}]}],
+            "weather": [{"date": day, "mintempC": "5", "maxtempC": "12", "hourly": [
+                {"time": "0", "chanceofrain": "10", "weatherDesc": [{"value": "Cloudy"}]},
+                {"time": "1200", "chanceofrain": "60", "weatherDesc": [{"value": "Rain"}],
+                 "lang_ru": [{"value": "Дождь"}]}]} for day in ("2026-10-26", "2026-10-27")]}
+
+
+def test_current_and_tomorrow_use_explicit_units_source_and_forecast_intervals():
+    data = payload()
+    current = wttr_weather_text(data, PLACE, False, NOW)
+    assert "На 15:00: Пасмурно, 10 °C, ощущается как 8 °C; ветер 12 км/ч" in current
+    assert "от 5 до 12 °C" in current and "На 12:00: Дождь" in current
+    assert "по интервалам прогноза: до 60%" in current and "Источник: wttr.in" in current
+    assert "Europe/Moscow" in current
+    tomorrow = wttr_weather_text(data, PLACE, True, NOW)
+    assert "завтра, 2026-10-27" in tomorrow and "На 15:00" not in tomorrow
+
+
+def test_new_york_date_is_local_and_hourly_slot_is_not_presented_as_whole_day():
+    place = {**PLACE, "timezone": "America/New_York"}
+    data = payload()
+    data["current_condition"][0]["localObsDateTime"] = "2026-10-26 21:00"
+    for day in data["weather"]:
+        day["hourly"] = day["hourly"][:1]
+    result = wttr_weather_text(data, place, True, datetime(2026, 10, 27, 1, tzinfo=timezone.utc))
+    assert "завтра, 2026-10-27 (America/New_York)" in result and "На 00:00: Cloudy" in result
+
+
+@pytest.mark.parametrize("failure", ["old", "future", "missing-observation", "missing-day", "bad-number",
+    "bad-wind", "empty-hourly", "bad-hour", "wrong-location", "no-timezone", "malformed-root"])
+def test_unusable_data_is_rejected_without_invented_weather(failure):
+    data, place = payload(), deepcopy(PLACE)
+    if failure == "old":
+        data["current_condition"][0]["localObsDateTime"] = "2026-10-25 03:00 PM"
+    elif failure == "future":
+        data["current_condition"][0]["localObsDateTime"] = "2026-10-27 03:00 PM"
+    elif failure == "missing-observation":
+        del data["current_condition"][0]["localObsDateTime"]
+    elif failure == "missing-day":
+        data["weather"] = []
+    elif failure == "bad-number":
+        data["weather"][0]["maxtempC"] = "NaN"
+    elif failure == "bad-wind":
+        data["current_condition"][0]["windspeedKmph"] = "-10"
+    elif failure == "empty-hourly":
+        data["weather"][0]["hourly"] = []
+    elif failure == "bad-hour":
+        data["weather"][0]["hourly"][0]["time"] = "1260"
+    elif failure == "wrong-location":
+        data["nearest_area"][0]["latitude"] = "0"
+    elif failure == "no-timezone":
+        del place["timezone"]
+    else:
+        data = []
+    with pytest.raises((ValueError, KeyError, TypeError)):
+        wttr_weather_text(data, place, False, NOW)
+
+
+async def test_old_saved_city_is_enriched_without_changing_preferences(config, database):
+    old = {key: value for key, value in PLACE.items() if key != "timezone"}
+    await database.set_weather_location(PARENT, old)
+    calls = []
+    def route(request):
+        calls.append(request)
+        if request.url.host == "geocoding-api.open-meteo.com":
+            assert request.url.path == "/v1/get" and request.url.params["id"] == "10"
+            return httpx.Response(200, json=PLACE)
+        assert request.url.host == "wttr.in" and request.url.path == "/55.000000,37.000000"
+        assert dict(request.url.params) == {"format": "j1", "lang": "ru"}
+        return httpx.Response(200, json=payload())
+    config = replace(config, weather=WeatherConfig(True, "wttr"))
+    engine = Facts(config, database, None, transport=httpx.MockTransport(route), now=lambda: NOW)
+    try:
+        result = await engine.answer(PARENT, "weather", "")
+        assert "10 °C" in result and "wttr.in" in result
+        assert await database.weather_location(PARENT) == old
+        assert await database.weather_location(CHILD) is None
+        assert len(calls) == 2
+        # Второй запрос получает общие публичные данные из ограниченного кэша.
+        assert "завтра" in await engine.answer(PARENT, "weather", "tomorrow")
+        assert len(calls) == 2
+        assert not any(request.url.host == "api.open-meteo.com" for request in calls)
+        assert all("example.org" not in str(request.url) for request in calls)
+    finally:
+        await engine.close()
+
+
+async def test_one_off_query_with_timezone_never_changes_default(config, database):
+    await database.set_weather_location(PARENT, PLACE)
+    other = {**PLACE, "id": 11, "name": "Другой город"}
+    calls = []
+    def route(request):
+        calls.append(request)
+        if request.url.path == "/v1/search":
+            return httpx.Response(200, json={"results": [other]})
+        return httpx.Response(200, json=payload())
+    engine = Facts(replace(config, weather=WeatherConfig(True, "wttr")), database, None,
+                   transport=httpx.MockTransport(route), now=lambda: NOW)
+    try:
+        result = await engine.answer(PARENT, "weather", "Другой город")
+        assert "Другой город" in result
+        assert await database.weather_location(PARENT) == PLACE
+        assert len(calls) == 2
+    finally:
+        await engine.close()
+
+
+def test_timezone_is_preserved_in_new_city_and_invalid_zone_is_rejected():
+    assert location(PLACE) == PLACE
+    with pytest.raises(KeyError):
+        location({**PLACE, "timezone": "Invalid/Zone"})
+
+
+def test_provider_configuration_and_doctor_without_network(config_file, capsys):
+    config_file.write_text(config_file.read_text().replace('provider = "open_meteo"', 'provider = "wttr"')
+                           .replace('[weather]\nenabled = false', '[weather]\nenabled = true'))
+    config = load_config(config_file)
+    assert config.weather == WeatherConfig(True, "wttr")
+    doctor(config)
+    assert "Источник погоды: wttr" in capsys.readouterr().out
+    config_file.write_text(config_file.read_text().replace('provider = "wttr"', 'provider = "https://arbitrary.example.org"'))
+    with pytest.raises(ConfigError, match="weather.provider"):
+        load_config(config_file)

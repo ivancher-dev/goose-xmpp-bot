@@ -19,10 +19,12 @@ from defusedxml.common import DefusedXmlException
 import httpx
 
 from .config import bare_jid
+from . import __version__
 
 log = logging.getLogger("goose")
 GEO = "https://geocoding-api.open-meteo.com/v1/"
 FORECAST = "https://api.open-meteo.com/v1/forecast"
+WTTR = "https://wttr.in/"
 MAX_BYTES = 524288
 WEATHER_HELP = ("Погода: !weather [город], !weather tomorrow [город]. "
                 "Свой город: !weather city <название> или #ID; просмотр: !weather city; "
@@ -55,10 +57,13 @@ def location(value):
     name = plain(value["name"], 100)
     if not name:
         raise ValueError
-    return {"id": ident, "name": name, "admin1": plain(value.get("admin1", ""), 100),
-            "country": plain(value.get("country", ""), 100),
-            "latitude": number(value["latitude"], -90, 90),
-            "longitude": number(value["longitude"], -180, 180)}
+    result = {"id": ident, "name": name, "admin1": plain(value.get("admin1", ""), 100),
+              "country": plain(value.get("country", ""), 100),
+              "latitude": number(value["latitude"], -90, 90),
+              "longitude": number(value["longitude"], -180, 180)}
+    if "timezone" in value:
+        result["timezone"] = ZoneInfo(value["timezone"]).key
+    return result
 
 
 def place_name(place):
@@ -174,6 +179,70 @@ def weather_text(data, place, tomorrow, now):
     return "\n".join(lines)
 
 
+def wttr_number(value, low, high):
+    # WWO/wttr.in передаёт измерения строками, в явно названных единицах.
+    if isinstance(value, str):
+        if not re.fullmatch(r"[+-]?[0-9]+(?:\.[0-9]+)?", value):
+            raise ValueError
+        value = float(value)
+    return number(value, low, high)
+
+
+def wttr_weather_text(data, place, tomorrow, now):
+    zone = ZoneInfo(place["timezone"])
+    area = data["nearest_area"][0]
+    lat = math.radians(wttr_number(area["latitude"], -90, 90))
+    lon = math.radians(wttr_number(area["longitude"], -180, 180))
+    target_lat, target_lon = map(math.radians, (place["latitude"], place["longitude"]))
+    haversine = math.sin((lat - target_lat) / 2)**2 + math.cos(lat) * math.cos(target_lat) * math.sin((lon - target_lon) / 2)**2
+    if 12742 * math.asin(math.sqrt(min(1, haversine))) > 250:
+        raise ValueError
+    current = data["current_condition"][0]
+    stamp = None
+    for pattern in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M"):
+        try:
+            stamp = datetime.strptime(current["localObsDateTime"], pattern).replace(tzinfo=zone)
+            break
+        except ValueError:
+            continue
+    if stamp is None or abs((now - stamp).total_seconds()) > 10800:
+        raise ValueError
+    day = (now.astimezone(zone) + timedelta(days=int(tomorrow))).date().isoformat()
+    daily = next((entry for entry in data["weather"] if entry["date"] == day), None)
+    if daily is None:
+        raise ValueError
+    minimum = wttr_number(daily["mintempC"], -100, 70)
+    maximum = wttr_number(daily["maxtempC"], minimum, 70)
+    slots = []
+    for entry in daily["hourly"]:
+        value = wttr_number(entry["time"], 0, 2359)
+        if value != int(value) or value % 100 >= 60:
+            raise ValueError
+        slots.append((int(value // 100) * 60 + int(value % 100), entry))
+    if not slots:
+        raise ValueError
+    minutes, representative = min(slots, key=lambda item: abs(item[0] - 720))
+    rain = max(wttr_number(entry["chanceofrain"], 0, 100) for _, entry in slots)
+    def summary(entry):
+        values = entry.get("lang_ru") or entry["weatherDesc"]
+        result = plain(values[0]["value"], 100)
+        if not result:
+            raise ValueError
+        return result
+    lines = [f"{place_name(place)} — {'завтра' if tomorrow else 'сегодня'}, {day} ({zone.key})."]
+    if not tomorrow:
+        temp = wttr_number(current["temp_C"], -100, 70)
+        feels = wttr_number(current["FeelsLikeC"], -120, 90)
+        wind = wttr_number(current["windspeedKmph"], 0, 500)
+        lines.append(f"На {stamp:%H:%M}: {summary(current)}, {temp:g} °C, "
+                     f"ощущается как {feels:g} °C; ветер {wind:g} км/ч.")
+    lines.append(f"Прогноз: от {minimum:g} до {maximum:g} °C. "
+                 f"На {minutes // 60:02d}:{minutes % 60:02d}: {summary(representative)}.")
+    lines.append(f"Вероятность дождя по интервалам прогноза: до {rain:g}%.")
+    lines.append("Источник: wttr.in — https://wttr.in/")
+    return "\n".join(lines)
+
+
 @dataclass
 class State:
     pending: deque = field(default_factory=deque)
@@ -235,9 +304,18 @@ class Facts:
                                 reply = await self.answer(jid, *request, valid=valid)
                         except FactsError as exc:
                             reply = str(exc)
-                        except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, OverflowError):
-                            log.warning("facts_failed reason=source_unavailable")
-                            reply = "Источник временно недоступен или вернул неверные данные. Попробуй позже."
+                        except httpx.TimeoutException:
+                            log.warning("facts_failed reason=source_timeout")
+                            reply = "Источник не ответил вовремя. Попробуй позже."
+                        except httpx.HTTPStatusError as exc:
+                            log.warning("facts_failed reason=http_status status=%d", exc.response.status_code)
+                            reply = "Источник вернул ошибку HTTP. Попробуй позже."
+                        except httpx.HTTPError:
+                            log.warning("facts_failed reason=source_network")
+                            reply = "Не удалось выполнить сетевой запрос к источнику. Попробуй позже."
+                        except (ValueError, KeyError, TypeError, IndexError, OverflowError):
+                            log.warning("facts_failed reason=source_data")
+                            reply = "Источник ответил, но данные неполны, устарели или имеют неверный формат. Попробуй позже."
                         if valid():
                             send = await self.prepare_reply(jid, reply)
                             if send and valid():
@@ -265,7 +343,7 @@ class Facts:
         self.attempts.append(self.clock())
         if self.client is None:
             self.client = httpx.AsyncClient(transport=self.transport, timeout=10, follow_redirects=False,
-                                          trust_env=False, headers={"User-Agent": "goose-xmpp-bot/0.2.1",
+                                          trust_env=False, headers={"User-Agent": "goose-xmpp-bot/" + __version__,
                                                                     "Accept-Encoding": "identity"})
         async with self.client.stream("GET", url, params=params) as response:
             response.raise_for_status()
@@ -336,6 +414,14 @@ class Facts:
         if place is None:
             return "Сначала задай свой город. " + WEATHER_HELP
         place = location(place)
+        if self.config.weather.provider == "wttr":
+            if "timezone" not in place:
+                # Совместимость с городами, сохранёнными 0.2.1 без timezone.
+                metadata = await self.geocode(f"#{place['id']}")
+                place["timezone"] = metadata["timezone"]
+            endpoint = WTTR + f"{place['latitude']:.6f},{place['longitude']:.6f}"
+            payload = await self.fetch(endpoint, {"format": "j1", "lang": "ru"})
+            return wttr_weather_text(json.loads(payload), place, tomorrow, self.now())
         payload = await self.fetch(FORECAST, {
             "latitude": place["latitude"], "longitude": place["longitude"],
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",

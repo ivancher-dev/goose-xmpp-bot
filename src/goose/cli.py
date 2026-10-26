@@ -68,6 +68,8 @@ def doctor(config):
     print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
           "; новости: " + ("включены" if config.news.enabled else "отключены") +
           ". Локальная проверка не обращается к источникам.")
+    if config.weather.enabled:
+        print("Источник погоды: " + config.weather.provider)
     if config.llm.enabled:
         read_persona(config.llm.persona_file)
         print("Образ Гуся: файл корректен; ключ API: " +

@@ -274,7 +274,11 @@ async def test_http_failure_is_bounded_and_no_raw_details_leak(system, failure):
     engine.client = httpx.AsyncClient(transport=httpx.MockTransport(respond), follow_redirects=False)
     engine.submit(PARENT, "!weather Город")
     await idle(engine)
-    assert len(calls) == 1 and "недоступен" in sent[0][1] and "sensitive" not in sent[0][1]
+    assert len(calls) == 1 and "Попробуй позже" in sent[0][1] and "sensitive" not in sent[0][1]
+    if failure == "timeout":
+        assert "не ответил вовремя" in sent[0][1]
+    elif failure == "redirect":
+        assert "HTTP" in sent[0][1]
 
 
 async def test_queue_limits_and_cancel_during_encryption_prevent_late_send(system):

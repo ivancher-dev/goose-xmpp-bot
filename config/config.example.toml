@@ -46,6 +46,7 @@ retention_days = 30
 
 [weather]
 enabled = false
+provider = "open_meteo" # или "wttr" при недоступности сервера прогноза Open-Meteo
 # Свой город задаётся в чате командой !weather city <название>.
 
 [news]
