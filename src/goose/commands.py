@@ -9,6 +9,8 @@ HELP = ("Диагностические команды: !help, !ping. Очист
         "!admin user set <bare_jid> grade=N|academic_year=YYYY-YYYY|schedule_class_id=ID. "
         "Режим диалога: !admin mode <bare_jid> [manual|auto]. "
         "После подключения сервиса auto требует повторного подтверждения. "
+        "Погода: !weather [город], !weather tomorrow [город]; свой город: !weather city <город>. "
+        "Новости: !news [источник]. Эти команды работают и в manual, если включены владельцем. "
         "!echo <текст> доступен только владельцу при echo_enabled=true.")
 
 
@@ -16,6 +18,7 @@ class Commands:
     def __init__(self, config, database, status=lambda: "Этап 2; модель отключена.", dialogues=None):
         self.config, self.database, self.status = config, database, status
         self.dialogues = dialogues
+        self.facts = None
 
     async def handle(self, sender, body):
         sender = bare_jid(sender)
@@ -31,6 +34,8 @@ class Commands:
         if words[0] == "!context":
             if words != ["!context", "clear"]:
                 return "Использование: !context clear"
+            if self.facts:
+                self.facts.cancel(sender)
             if self.dialogues:
                 await self.dialogues.clear(sender)
             else:
@@ -55,6 +60,8 @@ class Commands:
                 if self.dialogues is None:
                     raise ConfigError("Управление режимами доступно в запущенном сервисе.")
                 if len(words) == 4:
+                    if words[3] == "manual" and self.facts:
+                        self.facts.cancel(target)
                     await self.dialogues.set_mode(target, words[3])
                 return "Режим: " + await self.dialogues.mode(target)
             if len(words) not in (4, 5) or words[1] != "user" or words[2] not in {"show", "set"}:

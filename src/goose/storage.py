@@ -56,7 +56,7 @@ class Database:
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -78,16 +78,31 @@ class Database:
                 body TEXT NOT NULL, created REAL NOT NULL,
                 PRIMARY KEY(jid, turn, role), CHECK(role IN ('user', 'assistant')))""")
             db.execute("CREATE INDEX IF NOT EXISTS history_created ON history(created)")
+            db.execute("CREATE TABLE IF NOT EXISTS weather_locations (jid TEXT PRIMARY KEY, value TEXT NOT NULL)")
             for jid, fields in profiles.items():
                 db.execute("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)",
                            (jid, fields["grade"], fields["academic_year"], fields["schedule_class_id"], fields["explanation_style"]))
-            db.execute("PRAGMA user_version=2")
+            db.execute("PRAGMA user_version=3")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
     async def profile(self, jid):
         row = await self.call(lambda db: db.execute("SELECT * FROM profiles WHERE jid=?", (jid,)).fetchone())
         return dict(row) if row else None
+
+    async def weather_location(self, jid):
+        row = await self.call(lambda db: db.execute(
+            "SELECT value FROM weather_locations WHERE jid=?", (jid,)).fetchone())
+        return json.loads(row[0]) if row else None
+
+    async def set_weather_location(self, jid, value):
+        if value is None:
+            await self.call(lambda db: db.execute("DELETE FROM weather_locations WHERE jid=?", (jid,)))
+        else:
+            payload = json.dumps(value, ensure_ascii=True)
+            await self.call(lambda db: db.execute(
+                "INSERT INTO weather_locations VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET value=excluded.value",
+                (jid, payload)))
 
     async def update_profile(self, jid, field, value):
         if field not in {"grade", "academic_year", "schedule_class_id"}:
