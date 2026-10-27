@@ -1,11 +1,16 @@
+import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 import re
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 
-from goose.facts import weather_text, wttr_condition, wttr_weather_text
-from goose.weather_view import Forecast, render_weather
+from goose.config import WeatherConfig
+from goose.facts import Facts, weather_text, wttr_condition, wttr_weather_text
+from goose.weather_view import Forecast, WeatherVoice, render_weather
 
 NOW = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
 PLACE = {"name": "Город", "admin1": "", "country": "Страна", "latitude": 55,
@@ -44,12 +49,12 @@ def render(provider, data, tomorrow=False):
 @pytest.mark.parametrize("tomorrow", [False, True])
 def test_both_providers_share_russian_goose_layout_and_convert_wind(provider, tomorrow):
     result = render(provider, provider_data(provider), tomorrow)
-    assert result.startswith("Га-Га-Га! Гусман докладывает о погоде!\n\nГород, Страна")
+    assert result.startswith("Город, Страна")
     assert ("завтра, 27.10.2026" if tomorrow else "сегодня, 26.10.2026") in result
     assert "Время местное: UTC+03:00." in result
     assert "Ветер по прогнозу: до 10 м/с." in result  # 36 км/ч = 10 м/с
     assert "км/ч" not in result and "Europe/Moscow" not in result
-    assert "Императорская сводка готова — возвращаюсь на диван!" in result
+    assert result.endswith("https://open-meteo.com/" if provider == "open_meteo" else "https://wttr.in/")
     if tomorrow:
         assert "По данным на" not in result and "ощущается" not in result
     else:
@@ -117,3 +122,62 @@ def test_current_date_warning_and_real_observation_time_survive_the_character_vo
     assert "Дата наблюдения не указана источником." in result
     assert "Вероятность дождя по интервалам: до 40%." in result
     assert "В 12:00: местами возможен дождь." in result
+
+
+def controlled_voice(kinds):
+    sequence = iter(kinds)
+    def choose(options):
+        return next(sequence) if None in options else options[0]
+    return WeatherVoice(rng=SimpleNamespace(choice=choose))
+
+
+@pytest.mark.parametrize("kind", ["intro", "outro", None])
+def test_voice_adds_at_most_one_short_russian_phrase_without_changing_facts(kind):
+    report = render("wttr", provider_data("wttr"))
+    result = controlled_voice([kind]).decorate(report)
+    assert result.count(report) == 1
+    decoration = result.replace(report, "").strip()
+    if kind is None:
+        assert result == report
+    else:
+        assert 0 < len(decoration) < 100 and "\n" not in decoration
+        assert not re.search(r"[A-Za-z0-9]", decoration)
+        assert result.endswith(report) if kind == "intro" else result.startswith(report)
+
+
+def test_each_kind_of_phrase_changes_even_when_quiet_reports_intervene():
+    report = render("wttr", provider_data("wttr"))
+    voice = controlled_voice(["intro", None, "intro", "outro", None, "outro"])
+    results = [voice.decorate(report) for _ in range(6)]
+    assert results[0] != results[2] and results[3] != results[5]
+    assert results[1] == results[4] == report
+    assert all(result.count(report) == 1 for result in results)
+
+
+@pytest.mark.parametrize("provider", ["open_meteo", "wttr"])
+async def test_voice_is_per_bare_jid_and_changes_even_when_forecast_is_cached(config, database, provider):
+    parent, child = "parent@example.org", "pupil1@example.org"
+    place = {**PLACE, "id": 10}
+    for jid in (parent, child):
+        await database.set_weather_location(jid, place)
+    calls, sent = [], []
+    def route(request):
+        calls.append(request)
+        return httpx.Response(200, json=provider_data(provider))
+    async def prepare(jid, reply):
+        return lambda: sent.append((jid, reply))
+    engine = Facts(replace(config, weather=WeatherConfig(True, provider)), database, prepare,
+                   transport=httpx.MockTransport(route), now=lambda: NOW)
+    try:
+        for jid in (parent, child):
+            engine.states[jid].weather_voice = controlled_voice(["intro", "intro"])
+        for jid in (parent + "/phone", child + "/phone", parent + "/desktop"):
+            assert engine.submit(jid, "Гусик, расскажи про погоду")
+            await asyncio.wait_for(asyncio.gather(*tuple(engine.tasks)), 1)
+        assert [jid for jid, _ in sent] == [parent, child, parent]
+        assert sent[0][1] == sent[1][1] and sent[0][1] != sent[2][1]
+        report = render(provider, provider_data(provider))
+        assert all(text.endswith(report) for _, text in sent)
+        assert len(calls) == 1  # Шутки меняются без дополнительных HTTP-запросов.
+    finally:
+        await engine.close()

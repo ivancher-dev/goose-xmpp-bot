@@ -81,7 +81,30 @@ async def idle(engine):
     ("Гусик, какая погода завтра в Москве?", ("weather", "завтра Москве")),
     ("!погода tomorrow #10", ("weather", "tomorrow #10")),
     ("Гусман, покажи свежие новости с agency.example.org!", ("news", "agency.example.org")),
+    ("Какая сейчас погода в Москве?", ("weather", "Москве")),
+    ("Какая будет погода завтра в Москве?", ("weather", "завтра Москве")),
+    ("Расскажи про погоду", ("weather", "")),
+    ("Гусик, расскажи мне о погоде", ("weather", "")),
+    ("Пожалуйста, покажи погоду", ("weather", "")),
+    ("Скажи погоду, пожалуйста!", ("weather", "")),
+    ("Гусь, покажи прогноз погоды на завтра в Москве", ("weather", "завтра Москве")),
+    ("Прогноз погоды на сегодня", ("weather", "сегодня")),
+    ("Что с погодой завтра?", ("weather", "завтра")),
+    ("Погода сейчас в Москве", ("weather", "сегодня Москве")),
+    ("Какие последние новости?", ("news", "")),
+    ("Какие сегодня новости?", ("news", "")),
+    ("Последние новости", ("news", "")),
+    ("Гусман, расскажи последние новости с agency.example.org", ("news", "agency.example.org")),
+    ("Расскажи мне о новостях", ("news", "")),
+    ("Расскажи про новости из agency.example.org", ("news", "agency.example.org")),
+    ("Покажи мне сегодняшние новости", ("news", "")),
+    ("Скажи свежие новости, пожалуйста", ("news", "")),
     ("Напиши рассказ о погоде", None), ("!admin status", None),
+    ("Объясни, как предсказывают погоду", None),
+    ("Гусик, придумай сказку про новости", None),
+    ("Расскажи, почему меняется погода", None),
+    ("В прошлый раз новости были интереснее", None),
+    ("Что нового в решении уравнения?", None),
 ])
 def test_routing(body, expected):
     assert intent(body) == expected
@@ -157,9 +180,11 @@ async def test_news_five_sorted_headlines_and_allowlisted_source_only(system):
     assert result.count("https://agency.example.org/item/") == 5
     assert result.index("Новость 0") < result.index("Новость 4")
     assert "26.10.2026" in result and "Новость 5" not in result
-    engine.submit(PARENT, "!news https://unlisted.example.org/")
-    await idle(engine)
-    assert "не настроен" in sent[-1][1] and len(calls) == 1
+    for request in ("!news https://unlisted.example.org/",
+                    "Расскажи последние новости с https://unlisted.example.org/"):
+        engine.submit(PARENT, request)
+        await idle(engine)
+        assert "не настроен" in sent[-1][1] and len(calls) == 1
 
 
 def test_rss_filters_dates_duplicates_foreign_links_and_html():
@@ -211,6 +236,7 @@ async def test_disabled_features_and_unauthorized_users_make_no_requests(config,
         engine.submit(PARENT, "!weather city Город")
         engine.submit(PARENT, "!news")
         engine.submit("unknown@example.org", "!weather")
+        engine.submit("unknown@example.org", "Расскажи про погоду")
         await idle(engine)
         assert len(sent) == 2 and all("отключен" in text for text in sent)
         assert engine.client is None

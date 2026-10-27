@@ -2,6 +2,43 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from random import Random
+
+
+INTRODUCTIONS = (
+    "Га-Га-Га! Вот что у нас с погодой:",
+    "Император Вселенной повелевает погоде быть такой:",
+    "Гусь-метеоролог сверился со сводкой:",
+    "Гусик изучил прогноз и готов доложить:",
+    "Погодная канцелярия Гусинландии докладывает:",
+    "Гусман на связи. Вот погодная сводка:",
+)
+FAREWELLS = (
+    "Метеорологический долг исполнен. Можно и на диван!",
+    "Сводку передал. Перья поправил.",
+    "Император удаляется по важным гусиным делам.",
+    "На этом всё. Пойду проверю запасы Синтепониума.",
+    "Погоду доложил, дальше — по гусиным делам.",
+    "Га-Га-Га! Канцелярия погоды откланивается.",
+)
+
+
+class WeatherVoice:
+    """Короткие реплики одного собеседника; саму сводку не изменяют."""
+
+    def __init__(self, *, rng=None):
+        self.rng = rng if rng is not None else Random()
+        self.previous = {}
+
+    def decorate(self, report):
+        # Не больше одной реплики; четверть вариантов — спокойная сводка.
+        kind = self.rng.choice(("intro", "intro", "outro", None))
+        if kind is None:
+            return report
+        phrases = INTRODUCTIONS if kind == "intro" else FAREWELLS
+        phrase = self.rng.choice(tuple(p for p in phrases if p != self.previous.get(kind)))
+        self.previous[kind] = phrase
+        return f"{phrase}\n\n{report}" if kind == "intro" else f"{report}\n\n{phrase}"
 
 
 WWO_CONDITIONS = {
@@ -63,8 +100,7 @@ def render_weather(place, day, zone, forecast, *, source, source_url, tomorrow=F
     reference = observation.stamp if observation else datetime(date.year, date.month, date.day, 12, tzinfo=zone)
     offset = int(reference.utcoffset().total_seconds() / 60)
     clock_zone = f"UTC{'+' if offset >= 0 else '−'}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
-    lines = ["Га-Га-Га! Гусман докладывает о погоде!", "",
-             f"{place} — {'завтра' if tomorrow else 'сегодня'}, {date:%d.%m.%Y}.",
+    lines = [f"{place} — {'завтра' if tomorrow else 'сегодня'}, {date:%d.%m.%Y}.",
              f"Время местное: {clock_zone}.", ""]
     if observation:
         lines.extend([
@@ -85,6 +121,5 @@ def render_weather(place, day, zone, forecast, *, source, source_url, tomorrow=F
     lines.append("Ветер по прогнозу: " + (f"до {decimal(forecast.wind_ms)} м/с."
                                         if forecast.wind_ms is not None else "нет данных."))
     lines.extend([f"Вероятность {forecast.precipitation} по интервалам: до {decimal(forecast.probability)}%.", "",
-                  f"Источник: {source} — {source_url}",
-                  "Императорская сводка готова — возвращаюсь на диван!"])
+                  f"Источник: {source} — {source_url}"])
     return "\n".join(lines)

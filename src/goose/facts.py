@@ -20,7 +20,7 @@ import httpx
 
 from .config import bare_jid
 from . import __version__
-from .weather_view import Forecast, Observation, WWO_CONDITIONS, render_weather
+from .weather_view import Forecast, Observation, WWO_CONDITIONS, WeatherVoice, render_weather
 
 log = logging.getLogger("goose")
 GEO = "https://geocoding-api.open-meteo.com/v1/"
@@ -77,13 +77,22 @@ def intent(body):
     if match:
         return ("weather" if match[1].lower() in {"weather", "погода"} else "news", match[2] or "")
     text = re.sub(r"^(?:гусь|гусик|гусман)[,! ]+", "", text, flags=re.I).strip(" ?!.")
-    match = re.fullmatch(r"(?:какая\s+)?погода(?:\s+(.*))?", text, re.I)
+    text = re.sub(r"^пожалуйста[,\s]+|(?:,\s*|\s+)пожалуйста$", "", text, flags=re.I)
+    match = re.fullmatch(
+        r"(?:(?:какая(?:\s+(?:сейчас|будет))?\s+)?погода|что\s+с\s+погодой|"
+        r"прогноз\s+погоды|(?:покажи|расскажи|скажи)(?:\s+мне)?\s+"
+        r"(?:погоду|про\s+погоду|о\s+погоде|прогноз\s+погоды))(?:\s+(.*))?", text, re.I)
     if match:
         tail = match[1] or ""
+        tail = re.sub(r"(^|\s)на\s+(?=(?:завтра|сегодня)(?:\s|$))", r"\1", tail, flags=re.I)
+        tail = re.sub(r"(^|\s)сейчас(?=\s|$)", r"\1сегодня", tail, flags=re.I)
         # Предлог относится к месту; tomorrow/завтра обрабатываются отдельно.
         tail = re.sub(r"(^|\s)в\s+", r"\1", tail, count=1, flags=re.I)
         return "weather", tail
-    match = re.fullmatch(r"(?:покажи\s+)?(?:свежие\s+)?новости(?:\s+(.*))?", text, re.I)
+    match = re.fullmatch(
+        r"(?:(?:(?:покажи|расскажи|скажи)(?:\s+мне)?\s+|какие(?:\s+сегодня)?\s+)?"
+        r"(?:(?:свежие|последние|сегодняшние)\s+)?новости|"
+        r"расскажи(?:\s+мне)?\s+(?:про\s+новости|о\s+новостях))(?:\s+(.*))?", text, re.I)
     if match:
         return "news", re.sub(r"^(?:из|с|от)\s+", "", match[1] or "", flags=re.I)
     return None
@@ -286,6 +295,7 @@ class State:
     pending: deque = field(default_factory=deque)
     task: asyncio.Task | None = None
     revision: int = 0
+    weather_voice: WeatherVoice = field(default_factory=WeatherVoice)
 
 
 class Facts:
@@ -459,13 +469,15 @@ class Facts:
                 place["timezone"] = metadata["timezone"]
             endpoint = WTTR + f"{place['latitude']:.6f},{place['longitude']:.6f}"
             payload = await self.fetch(endpoint, {"format": "j1", "lang": "ru"})
-            return wttr_weather_text(json.loads(payload), place, tomorrow, self.now())
+            report = wttr_weather_text(json.loads(payload), place, tomorrow, self.now())
+            return self.states[jid].weather_voice.decorate(report)
         payload = await self.fetch(FORECAST, {
             "latitude": place["latitude"], "longitude": place["longitude"],
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
             "forecast_days": 2, "timezone": "auto", "temperature_unit": "celsius", "wind_speed_unit": "kmh"})
-        return weather_text(json.loads(payload), place, tomorrow, self.now())
+        report = weather_text(json.loads(payload), place, tomorrow, self.now())
+        return self.states[jid].weather_voice.decorate(report)
 
     async def news(self, arg):
         config = self.config.news
