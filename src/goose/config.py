@@ -236,7 +236,7 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     schedule = table(data, "schedule", {"enabled", "source_url", "timeout_seconds"})
     memory = table(data, "memory", {"recent_messages", "context_token_budget", "retention_days"})
     if typed(schedule, "enabled", bool, False):
-        raise ConfigError("Расписание не реализовано на этапе 2.")
+        raise ConfigError("Расписание пока не реализовано.")
     for section in (llm, schedule, memory):
         for key, value in section.items():
             if key == "enabled":

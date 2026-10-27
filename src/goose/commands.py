@@ -8,14 +8,16 @@ HELP = ("Диагностические команды: !help, !ping. Очист
         "Владельцу: !admin status, !admin user show <bare_jid>, "
         "!admin user set <bare_jid> grade=N|academic_year=YYYY-YYYY|schedule_class_id=ID. "
         "Режим диалога: !admin mode <bare_jid> [manual|auto]. "
-        "После подключения сервиса auto требует повторного подтверждения. "
+        "Ручная отправка с другого устройства Гуся включает manual этого диалога. "
+        "После подключения auto восстанавливается только при успешной проверке архива; "
+        "при неполном архиве подтвердите auto явно. "
         "Погода: !weather [город], !weather tomorrow [город]; свой город: !weather city <город>. "
         "Новости: !news [источник]. Эти команды работают и в manual, если включены владельцем. "
         "!echo <текст> доступен только владельцу при echo_enabled=true.")
 
 
 class Commands:
-    def __init__(self, config, database, status=lambda: "Этап 2; модель отключена.", dialogues=None):
+    def __init__(self, config, database, status=lambda: "Этап 3; модель отключена.", dialogues=None):
         self.config, self.database, self.status = config, database, status
         self.dialogues = dialogues
         self.facts = None
