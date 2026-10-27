@@ -42,6 +42,7 @@ async def archive_server(running, monkeypatch):
     calls = []
     server = SimpleNamespace(records=records, calls=calls, mutate=None, finish=None)
     async def send(iq, **kwargs):
+        ET.fromstring(str(iq))
         assert kwargs['timeout'] == 5
         assert str(iq['to']) == OWN
         peer = str(iq['mam']['with'])
@@ -97,6 +98,31 @@ async def restart(client):
     await client.dialogues.initialize()
     client.archive = ArchiveSync(client)
     return model
+
+
+@pytest.mark.parametrize('baseline', [True, False])
+async def test_mam_query_serializes_through_real_iq_send(running, monkeypatch, baseline):
+    client, model, _, sent = running
+    client.archive = ArchiveSync(client)
+    client.session_bind_event.set()
+    packets = []
+
+    def send(stanza, **kwargs):
+        # Настоящий Iq.send и сериализатор Slixmpp; подставлена только сеть.
+        packet = ET.fromstring(str(stanza))
+        packets.append(packet)
+        response = Iq(stream=client)
+        response['id'], response['type'], response['from'] = packet.get('id'), 'result', OWN
+        response['to'] = str(client.boundjid)
+        ET.SubElement(response.xml, f'{{{MAM}}}fin', {'complete': 'true'})
+        client.recv_stanza(response)
+
+    monkeypatch.setattr(client, 'send', send)
+    assert await client.archive.query(CHILD, time.time(), baseline=baseline) == ([], None, True)
+    query = packets[0].find(f'{{{MAM}}}query')
+    assert query.findtext(f'{{{RSM}}}set/{{{RSM}}}max') == str(1 if baseline else PAGE_SIZE)
+    assert (query.find(f'{{{RSM}}}set/{{{RSM}}}before') is not None) == baseline
+    assert not sent and not model.complete.called
 
 
 async def test_first_baseline_never_imports_old_history_or_enables_old_auto(archive_server, database):

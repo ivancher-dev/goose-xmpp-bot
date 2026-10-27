@@ -111,7 +111,8 @@ class ArchiveSync:
         iq['mam']['end'] = datetime.fromtimestamp(end, timezone.utc)
         if start is not None:
             iq['mam']['start'] = datetime.fromtimestamp(start, timezone.utc)
-        iq['mam']['rsm']['max'] = 1 if baseline else PAGE_SIZE
+        # RSM Set передаёт значение в XML.text без приведения типа.
+        iq['mam']['rsm']['max'] = str(1 if baseline else PAGE_SIZE)
         if baseline:
             # Slixmpp 1.17: именно True создаёт пустой <before/>, '' удаляет его.
             iq['mam']['rsm']['before'] = True
