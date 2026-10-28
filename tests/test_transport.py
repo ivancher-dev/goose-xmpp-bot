@@ -253,7 +253,8 @@ async def test_close_cancels_initialization_before_closing_dialogues(config, dat
     monkeypatch.setattr(client, "get_roster", AsyncMock())
     monkeypatch.setattr(client, "send_presence", Mock())
     monkeypatch.setattr(client.plugin["xep_0030"], "get_info", AsyncMock(return_value={"disco_info": {"features": []}}))
-    monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager", AsyncMock(return_value=Mock()))
+    manager = SimpleNamespace(get_own_device_information=AsyncMock(return_value=(SimpleNamespace(device_id=11), ())))
+    monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager", AsyncMock(return_value=manager))
     monkeypatch.setattr(client.plugin["xep_0384"], "aclose", AsyncMock())
     starting = asyncio.create_task(client.on_start(None))
     await asyncio.wait_for(entered.wait(), 1)
@@ -330,8 +331,10 @@ async def test_only_service_accepts_bare_delivery_and_runs_commands(config, data
                         AsyncMock(return_value={"disco_info": {"features": [CARBONS]}}))
     monkeypatch.setattr(client.plugin["xep_0280"], "enable", AsyncMock())
     if mode != "probe":
+        manager = SimpleNamespace(get_own_device_information=AsyncMock(return_value=(SimpleNamespace(device_id=11), ())),
+                                  before_history_sync=Mock(), after_history_sync=AsyncMock())
         monkeypatch.setattr(client.plugin["xep_0384"], "get_session_manager",
-                            AsyncMock(return_value=Mock()))
+                            AsyncMock(return_value=manager))
     await client.on_start(None)
     assert client.ready.is_set()
     client.send_presence.assert_called_once_with(ppriority=priority)
