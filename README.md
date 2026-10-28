@@ -98,6 +98,7 @@ TLS обязателен. Отправка и приём в этой верси�
 | [docs/tasks/02a-weather-news.md](docs/tasks/02a-weather-news.md) | Расширение: погода и новости |
 | [docs/tasks/03-owner-takeover.md](docs/tasks/03-owner-takeover.md) | Этап 3: совместная переписка и восстановление |
 | [docs/tasks/03a-persona-presence.md](docs/tasks/03a-persona-presence.md) | Расширение: образ, статус набора и лайки |
+| [docs/tasks/03b-language-feedback.md](docs/tasks/03b-language-feedback.md) | Запланировано: языковые комментарии с сохранением основного ответа |
 | [docs/PERSONA_PRESENCE.md](docs/PERSONA_PRESENCE.md) | Обновление 0.3.2, настройки и проверки новых функций |
 | [docs/WEATHER_NEWS.md](docs/WEATHER_NEWS.md) | Установка 0.2.5, команды и проверки источников |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Настройки, профили и команды по этапам |
