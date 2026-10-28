@@ -21,10 +21,11 @@ from .config import ConfigError, bare_jid
 from .dialogue import Dialogues
 from .facts import Facts
 from .facts import intent as facts_intent
-from .events import SID, message_keys, ordinary_message, owner_stanza
+from .events import SID, message_keys, ordinary_message, owner_stanza, social_only
 from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
+from .social import Social, reaction_id
 
 log = logging.getLogger("goose")
 CARBONS = "urn:xmpp:carbons:2"
@@ -40,6 +41,8 @@ def classify(stanza, own_jid):
         sender = bare_jid(str(stanza["from"]))
     except ConfigError:
         return "invalid-sender"
+    if social_only(stanza):
+        return "service"
     if any(e.tag.startswith("{urn:xmpp:mam:") for e in xml.iter()):
         return "archive"
     if xml.find(f".//{{{DELAY}}}delay") is not None or xml.find(".//{jabber:x:delay}x") is not None:
@@ -128,6 +131,7 @@ class GooseClient(ClientXMPP):
         self.message_lock = asyncio.Lock()
         self.features = {"carbons": "не проверено", "mam": "не проверено"}
         self.queue = asyncio.Queue(maxsize=64)
+        self.social = Social(self)
         self.worker = None
         self.ssl_context = ssl.create_default_context()
         self.ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -136,6 +140,10 @@ class GooseClient(ClientXMPP):
         self.auto_subscribe = False
         for name in ("xep_0030", "xep_0199", "xep_0280", "xep_0313", "xep_0380"):
             self.register_plugin(name)
+        if self.serving_commands and config.interaction.typing_enabled:
+            self.register_plugin('xep_0085')
+        if self.serving_commands and config.interaction.reactions_enabled:
+            self.register_plugin('xep_0444')
         if not probe:
             register(self, OmemoStorage(database))
         if self.serving_commands:
@@ -216,7 +224,8 @@ class GooseClient(ClientXMPP):
                 if self.serving_commands:
                     self.own_events = dict.fromkeys(await self.database.owner_event_keys())
                     model = OpenAICompatible(self.config.llm) if self.config.llm.enabled else None
-                    self.dialogues = Dialogues(self.config, self.database, model, self.prepare_reply)
+                    self.dialogues = Dialogues(self.config, self.database, model, self.prepare_reply,
+                                               social=self.social)
                     await self.dialogues.initialize()
                     self.commands.dialogues = self.dialogues
                     self.facts = Facts(self.config, self.database, self.prepare_reply)
@@ -250,6 +259,7 @@ class GooseClient(ClientXMPP):
                 f"восстановление архива: {archive}; "
                 f"модель={'включена' if self.config.llm.enabled else 'отключена'}; "
                 f"погода={self.config.weather.enabled}; новости={self.config.news.enabled}; "
+                f"набор={self.config.interaction.typing_enabled}; реакции={self.config.interaction.reactions_enabled}; "
                 "архив не запускает команды; расписание отключено; ручная отправка включает manual.")
 
     def archive_message(self, stanza):
@@ -365,8 +375,9 @@ class GooseClient(ClientXMPP):
             body = decrypted["body"]
             if not body or len(body) > 2048:
                 return
+            self.social.observe(sender, stanza)
             if not body.lstrip().startswith('!') and facts_intent(body) is None and self.dialogues and self.config.llm.enabled:
-                await self.dialogues.submit(sender, body, keys=keys)
+                await self.dialogues.submit(sender, body, keys=keys, message_id=reaction_id(stanza))
                 return
             if not await self.database.remember_event(sender, keys, 'incoming'):
                 return
@@ -492,6 +503,8 @@ class GooseClient(ClientXMPP):
         encrypted["eme"]["name"] = "OMEMO"
         encrypted['from'] = self.boundjid
         encrypted['to'] = sender
+        if self.social.chat_enabled(sender):
+            encrypted['chat_state'] = 'active'
         # Шифровальщик сохраняет id, но удаляет остальные sid-теги исходной stanza.
         ET.SubElement(encrypted.xml, f'{{{SID}}}origin-id', {'id': encrypted['id']})
         keys = message_keys(encrypted, self.config.jid)
@@ -507,6 +520,7 @@ class GooseClient(ClientXMPP):
         return send
 
     async def close(self):
+        await self.social.close()
         self.ready.clear()
         self.accepting = False
         self.cancel_connection_attempt()

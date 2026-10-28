@@ -249,7 +249,7 @@ async def test_close_cancels_initialization_before_closing_dialogues(config, dat
     async def close():
         assert cancelled.is_set()
     dialogues = SimpleNamespace(initialize=initialize, close=AsyncMock(side_effect=close))
-    monkeypatch.setattr("goose.transport.Dialogues", lambda *args: dialogues)
+    monkeypatch.setattr("goose.transport.Dialogues", lambda *args, **kwargs: dialogues)
     monkeypatch.setattr(client, "get_roster", AsyncMock())
     monkeypatch.setattr(client, "send_presence", Mock())
     monkeypatch.setattr(client.plugin["xep_0030"], "get_info", AsyncMock(return_value={"disco_info": {"features": []}}))

@@ -1,6 +1,11 @@
 # Гусь — семейный XMPP-помощник
 
-Версия 0.3.1 добавляет ручной перехват переписки и восстановление MAM к модели,
+Версия 0.3.2 добавляет расширенный образ Императора Вселенной, опциональные
+служебный статус «Печатает…» и редкие реакции 👍 на вопросы без отдельного
+запроса к модели. [Обновление и приёмка](docs/PERSONA_PRESENCE.md).
+Новые функции 0.3.2 пока проверены офлайн.
+
+Этап 3 добавил ручной перехват переписки и восстановление MAM к модели,
 раздельной памяти, погоде и новостям. Основа: Python 3.12, Slixmpp, SQLite и
 legacy OMEMO. Сервис предназначен для **отдельного тестового XMPP-аккаунта**.
 В живом пилоте подтверждены API Alice AI LLM Flash, первые учебные ответы,
@@ -90,6 +95,8 @@ TLS обязателен. Отправка и приём в этой верси�
 | [docs/tasks/02-model-memory.md](docs/tasks/02-model-memory.md) | Задание второго этапа |
 | [docs/tasks/02a-weather-news.md](docs/tasks/02a-weather-news.md) | Расширение: погода и новости |
 | [docs/tasks/03-owner-takeover.md](docs/tasks/03-owner-takeover.md) | Этап 3: совместная переписка и восстановление |
+| [docs/tasks/03a-persona-presence.md](docs/tasks/03a-persona-presence.md) | Расширение: образ, статус набора и лайки |
+| [docs/PERSONA_PRESENCE.md](docs/PERSONA_PRESENCE.md) | Обновление 0.3.2, настройки и проверки новых функций |
 | [docs/WEATHER_NEWS.md](docs/WEATHER_NEWS.md) | Установка 0.2.5, команды и проверки источников |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Настройки, профили и команды по этапам |
 | [config/config.example.toml](config/config.example.toml) | Поддерживаемый пример с вымышленными аккаунтами |

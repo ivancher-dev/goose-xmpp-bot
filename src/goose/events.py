@@ -15,8 +15,17 @@ DELAY = 'urn:xmpp:delay'
 SID = 'urn:xmpp:sid:0'
 
 
+def social_only(stanza):
+    # Реакции могут содержать fallback-body, но не являются текстом собеседника.
+    if stanza.xml.find('{urn:xmpp:reactions:0}reactions') is not None:
+        return True
+    return (not stanza['body'].strip()
+            and not any(c.tag.endswith('}encrypted') for c in stanza.xml)
+            and any(c.tag.startswith('{http://jabber.org/protocol/chatstates}') for c in stanza.xml))
+
+
 def ordinary_message(stanza, *, delayed=False):
-    if stanza['type'] not in {'chat', 'normal'}:
+    if stanza['type'] not in {'chat', 'normal'} or social_only(stanza):
         return False
     for element in stanza.xml.iter():
         tag = element.tag
