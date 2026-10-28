@@ -268,6 +268,21 @@ def test_migration_runs_against_clone_not_live_or_preserved_copy(installation):
     assert contents(x.paths) == before
 
 
+@pytest.mark.parametrize('name', ['config', 'env', 'unit'])
+def test_operator_edits_during_migration_are_preserved_and_activation_is_cancelled(installation, name):
+    x = installation
+    original = x.updater.run
+    def run(args, **kwargs):
+        if m.MIGRATE in args:
+            x.paths[name].write_text(x.paths[name].read_text() + '\n# operator edit during migration\n')
+        return original(args, **kwargs)
+    x.updater.run = run
+    with pytest.raises(m.UpdateError):
+        x.updater.update()
+    assert x.paths[name].read_text().endswith('# operator edit during migration\n')
+    assert not x.updater.active.is_symlink() and x.system.active
+
+
 def test_system_requires_new_invocation_notify_and_running_pid(monkeypatch):
     seen = []
     states = iter([

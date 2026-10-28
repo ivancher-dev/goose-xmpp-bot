@@ -394,6 +394,11 @@ class Updater:
             if self.active.resolve() != Path(state["original_env"]):
                 if inspect(self.active.resolve(), self.run) != state["old_dependencies"]:
                     raise UpdateError("Зависимости изменились. Сервис остановлен; откат требует отдельной проверки OMEMO.")
+            changed_code = state['phase'] in {'switching', 'activated'}
+            if changed_code:
+                expected = {state['old_unit'].encode(), (Path(state['release']) / UNIT).read_bytes()}
+                if self.paths['unit'].read_bytes() not in expected:
+                    raise UpdateError('Unit изменён другим процессом. Сервис остановлен; правки сохранены для проверки.')
             doctor(old if old.exists() else self.active, self.paths, local=self.meta["local"], runner=self.run)
             if state["old_link"]:
                 self.switch(old)
@@ -401,8 +406,9 @@ class Updater:
                 self.active.unlink(missing_ok=True)
                 old.rename(self.active)
                 sync_dir(self.active.parent)
-            atomic_write(self.paths["unit"], state["old_unit"].encode(), 0o644)
-            write_json(self.paths["prefix"] / "maintenance.json", state["old_metadata"])
+            if changed_code:
+                atomic_write(self.paths["unit"], state["old_unit"].encode(), 0o644)
+                write_json(self.paths["prefix"] / "maintenance.json", state["old_metadata"])
         self.system.reload()
         self.system.restore_enabled(state.get('was_enabled'))
         if state["was_active"]:
@@ -478,6 +484,8 @@ class Updater:
                         self.run([release / "venv/bin/python", "-c", MIGRATE, self.paths["config"], clone],
                                  cwd=self.paths["prefix"])
                         schema(clone)
+                    if self.input_hashes() != inputs:
+                        raise UpdateError('Настройки изменились во время копирования или пробной миграции; активация отменена.')
                     state["phase"] = "switching"
                     self.save(state)
                     if not old_link:
