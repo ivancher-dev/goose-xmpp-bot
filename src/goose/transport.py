@@ -17,7 +17,7 @@ from slixmpp.xmlstream.matcher import MatchXPath
 
 from .commands import Commands
 from .archive import ArchiveError, ArchiveSync
-from .config import ConfigError, bare_jid
+from .config import ConfigError, TransientError, bare_jid
 from .dialogue import Dialogues
 from .facts import Facts
 from .facts import intent as facts_intent
@@ -26,6 +26,7 @@ from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
 from .social import Social, reaction_id
+from .lifecycle import notify_ready
 
 log = logging.getLogger("goose")
 CARBONS = "urn:xmpp:carbons:2"
@@ -242,6 +243,8 @@ class GooseClient(ClientXMPP):
                     self.worker = asyncio.create_task(self.process_queue())
                     self.archive.start()
             self.ready.set()
+            if self.serving_commands:
+                notify_ready()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
         except asyncio.CancelledError:
             raise
@@ -585,4 +588,4 @@ async def run_sessions(config, database, stop, action=None, *, probe=False, clie
                 await asyncio.wait_for(stop.wait(), min(2 ** attempt, 8))
             if stop.is_set():
                 return
-    raise ConfigError("Исчерпаны ограниченные попытки XMPP; проверьте TLS, сеть и настройки.")
+    raise TransientError("Исчерпаны ограниченные попытки XMPP; проверьте TLS и доступность сервера.")

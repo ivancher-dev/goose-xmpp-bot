@@ -11,7 +11,7 @@ import time
 
 from omemo.storage import Just, Nothing, Storage
 
-from .config import ConfigError, profile_value
+from .config import ConfigError, TransientError, profile_value
 
 
 @contextmanager
@@ -23,7 +23,7 @@ def data_lock(directory: Path):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise ConfigError("Хранилище уже используется; остановите сервис перед управлением устройствами.") from exc
+            raise TransientError("Хранилище уже используется; остановите сервис перед управлением устройствами.") from exc
         try:
             yield
         finally:
@@ -258,9 +258,10 @@ class Database:
                        (jid, anchor, stamp, trusted))
         await self.call(save)
 
-    async def invalidate_archive(self, jid):
+    async def invalidate_archive(self, jid, *, transient=False):
         def invalidate(db):
-            db.execute('UPDATE archive_cursors SET confirmed=0 WHERE jid=?', (jid,))
+            if not transient:
+                db.execute('UPDATE archive_cursors SET confirmed=0 WHERE jid=?', (jid,))
             db.execute("UPDATE dialogues SET suspended=1, revision=revision+1 WHERE jid=? AND mode='auto'", (jid,))
         await self.call(invalidate)
 

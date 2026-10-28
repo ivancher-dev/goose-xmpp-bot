@@ -2,17 +2,21 @@
 Description=Гусь: семейный XMPP-помощник
 After=network-online.target
 Wants=network-online.target
-# Ошибка после ограниченных попыток требует вмешательства владельца.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=goose-xmpp-bot
 Group=goose-xmpp-bot
 EnvironmentFile=@ENV_FILE@
 ExecStart=@PREFIX@/venv/bin/goose-bot run --config @CONFIG@
 WorkingDirectory=@PREFIX@
 UMask=0077
-Restart=no
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2
+TimeoutStartSec=0
 TimeoutStopSec=20
 NoNewPrivileges=true
 PrivateTmp=true

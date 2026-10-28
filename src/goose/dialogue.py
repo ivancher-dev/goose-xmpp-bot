@@ -113,8 +113,14 @@ class Dialogues:
             self._discard(jid)
 
     async def mode(self, jid):
-        row = await self.database.dialogue(self._target(jid))
-        return row["mode"] + (" (пауза: архив не восстановлен полностью; подтвердите auto)" if row["suspended"] else "")
+        jid = self._target(jid)
+        row = await self.database.dialogue(jid)
+        if not row['suspended']:
+            return row['mode']
+        cursor = await self.database.archive_cursor(jid)
+        note = ('ожидается полный архив; auto возобновится после проверки'
+                if cursor and cursor['confirmed'] else 'архив не восстановлен полностью; подтвердите auto')
+        return row['mode'] + ' (пауза: ' + note + ')'
 
     def hold(self, jid):
         jid = self._target(jid)
@@ -139,10 +145,10 @@ class Dialogues:
                 self._discard(jid)
             return changed
 
-    async def archive_failed(self, jid):
+    async def archive_failed(self, jid, *, transient=False):
         jid = self._target(jid)
         async with self.states[jid].lock:
-            await self.database.invalidate_archive(jid)
+            await self.database.invalidate_archive(jid, transient=transient)
             self.states[jid].guard += 1
             self._discard(jid)
 

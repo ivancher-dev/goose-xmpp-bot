@@ -8,6 +8,7 @@ import logging
 import xml.etree.ElementTree as ET
 
 from slixmpp import JID, Message
+from slixmpp.exceptions import IqError, IqTimeout
 
 from .config import bare_jid
 from .events import DELAY, FORWARD, ordinary_message
@@ -168,6 +169,14 @@ class ArchiveSync:
         raise ArchiveError()
 
     async def synchronize(self, *, startup=False):
+        if not startup and self.client.features['mam'] not in (True, False):
+            try:
+                info = await self.client.plugin['xep_0030'].get_info(
+                    jid=self.client.config.jid, local=False, cached=False, timeout=5)
+            except (IqError, IqTimeout, TimeoutError, ConnectionError, OSError):
+                log.warning('xmpp_discovery_incomplete feature=mam')
+            else:
+                self.client.features['mam'] = MAM in info['disco_info']['features']
         end = datetime.now(timezone.utc).timestamp()
         deadline = asyncio.get_running_loop().time() + SYNC_TIMEOUT
         peers = sorted(self.states)
@@ -187,13 +196,21 @@ class ArchiveSync:
                     else:
                         await self.recover(peer, cursor, end)
                         self.states[peer] = 'ready' if cursor['confirmed'] else 'confirmation_required'
-                        if startup and cursor['confirmed'] and self.client.features['carbons']:
+                        if cursor['confirmed'] and self.client.features['carbons']:
                             await self.database.resume_auto(peer, before['revision'])
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 self.states[peer] = 'incomplete'
-                await self.client.dialogues.archive_failed(peer)
+                temporary = isinstance(exc, (TimeoutError, IqTimeout, ConnectionError, OSError))
+                if isinstance(exc, IqError):
+                    temporary = exc.iq['error']['condition'] in {
+                        'service-unavailable', 'remote-server-timeout', 'resource-constraint', 'internal-server-error'}
+                await self.client.dialogues.archive_failed(peer, transient=temporary)
+                if temporary:
+                    # Подтверждённый anchor не теряем из-за краткого сбоя сети.
+                    log.warning('archive_sync_pending reason=temporary')
+                    continue
                 # Новая точка не даёт auto без явного подтверждения владельца.
                 try:
                     async with asyncio.timeout(max(0, peer_deadline - asyncio.get_running_loop().time())):

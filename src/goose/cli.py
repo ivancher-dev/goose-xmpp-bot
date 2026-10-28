@@ -14,7 +14,7 @@ from dataclasses import replace
 from slixmpp import JID
 
 from . import __version__
-from .config import ConfigError, bare_jid, load_config
+from .config import ConfigError, TransientError, bare_jid, load_config
 from .dialogue import read_persona
 from .model import ModelError, OpenAICompatible
 from .omemo import fingerprint, set_verified_trust
@@ -67,7 +67,8 @@ def doctor(config):
     print("Модель: " + ("включена; auto восстанавливается после проверки архива" if config.llm.enabled else "отключена"))
     print("Служебный набор: " + ("включён" if config.interaction.typing_enabled else "отключён") +
           "; реакции: " + ("включены" if config.interaction.reactions_enabled else "отключены"))
-    print("Ручная отправка включает manual; неполный архив требует подтверждения auto владельцем.")
+    print("Ручная отправка включает manual; временный сбой архива ставит auto на паузу до повтора. "
+          "Утраченная позиция требует подтверждения владельца.")
     print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
           "; новости: " + ("включены" if config.news.enabled else "отключены") +
           ". Локальная проверка не обращается к источникам.")
@@ -165,6 +166,9 @@ def main(argv=None):
         configure_logging(config.log_level)
         asyncio.run(execute(args, config))
         return 0
+    except TransientError as exc:
+        print(f"Временная ошибка: {exc}", file=sys.stderr)
+        return 75
     except ConfigError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
