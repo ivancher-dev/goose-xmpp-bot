@@ -1,4 +1,4 @@
-# Конфигурация этапа 2. Модель включается явно; расписание пока не реализовано.
+# Конфигурация этапа 3. Модель включается явно; расписание пока не реализовано.
 # Все аккаунты и идентификаторы расписания в этом файле вымышлены.
 config_version = 1
 timezone = "Europe/Moscow"
@@ -43,6 +43,20 @@ persona_file = "/etc/goose-xmpp-bot/persona.md"
 recent_messages = 24
 context_token_budget = 6000
 retention_days = 30
+
+[weather]
+enabled = false
+provider = "open_meteo" # или "wttr" при недоступности сервера прогноза Open-Meteo
+# Свой город задаётся в чате командой !weather city <название>.
+
+[news]
+enabled = false
+limit = 5
+max_age_hours = 48
+
+[news.sources.ria]
+name = "РИА Новости"
+url = "https://ria.ru/export/rss2/archive/index.xml"
 
 [schedule]
 enabled = false

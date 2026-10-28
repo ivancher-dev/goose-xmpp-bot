@@ -327,7 +327,7 @@ async def test_legacy_migration_preserves_identity_profiles_and_dedup(config):
     assert (await database.profile(CHILD))["grade"] == 5
     assert not await database.claim("already-handled", 60)
     assert await database.call(lambda db: db.execute("SELECT value FROM omemo").fetchone()[0]) == '{"fixture":true}'
-    assert await database.call(lambda db: db.execute("PRAGMA user_version").fetchone()[0]) == 2
+    assert await database.call(lambda db: db.execute("PRAGMA user_version").fetchone()[0]) == 4
 
 
 async def test_migration_failure_rolls_back_schema_and_old_data(config):

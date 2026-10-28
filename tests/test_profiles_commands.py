@@ -35,7 +35,7 @@ async def test_no_cross_account_storage(config, database):
 
 
 async def test_schema_future_rejected(config, database):
-    await database.call(lambda db: db.execute("PRAGMA user_version=3"))
+    await database.call(lambda db: db.execute("PRAGMA user_version=5"))
     with pytest.raises(ConfigError, match="версия БД"):
         await database.initialize({})
 

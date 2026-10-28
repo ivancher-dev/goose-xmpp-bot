@@ -56,7 +56,7 @@ def doctor(config):
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
             schema = db.execute("PRAGMA user_version").fetchone()[0]
-            if schema not in (1, 2):
+            if schema not in (1, 2, 3, 4):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
@@ -64,7 +64,13 @@ def doctor(config):
         print(f"SQLite: схема {schema}, целостность и привязка аккаунта проверены.")
     else:
         print("SQLite: ещё не создана; идентичность создаст первый запуск сервиса.")
-    print("Модель: " + ("включена; auto подтверждается владельцем" if config.llm.enabled else "отключена"))
+    print("Модель: " + ("включена; auto восстанавливается после проверки архива" if config.llm.enabled else "отключена"))
+    print("Ручная отправка включает manual; неполный архив требует подтверждения auto владельцем.")
+    print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
+          "; новости: " + ("включены" if config.news.enabled else "отключены") +
+          ". Локальная проверка не обращается к источникам.")
+    if config.weather.enabled:
+        print("Источник погоды: " + config.weather.provider)
     if config.llm.enabled:
         read_persona(config.llm.persona_file)
         print("Образ Гуся: файл корректен; ключ API: " +
@@ -134,7 +140,7 @@ async def execute(args, config):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Гусь: модель, память и явные режимы, этап 2")
+    parser = argparse.ArgumentParser(description="Гусь: совместная переписка и восстановление, этап 3")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("run", "doctor", "devices", "trust"):

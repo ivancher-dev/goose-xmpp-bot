@@ -223,3 +223,79 @@ async def test_model_reply_uses_real_omemo_and_duplicate_only_requests_once(conf
         await engine.close()
         await bot_manager.shutdown()
         await peer_manager.shutdown()
+
+
+@pytest.mark.parametrize('carbon_first', [False, True])
+async def test_own_other_device_real_omemo_pauses_and_restores_only_its_dialogue(
+        config, database, tmp_path, monkeypatch, carbon_message, carbon_first):
+    import asyncio
+    from copy import deepcopy
+    from types import SimpleNamespace
+    import time
+    from slixmpp import Message
+    pep = Pep()
+    bot_manager, _ = await create_manager(pep, tmp_path / 'service-crypto', config.jid)
+    manual_manager, manual_db = await create_manager(pep, tmp_path / 'manual-crypto', config.jid)
+    peer_manager, peer_db = await create_manager(pep, tmp_path / 'child-crypto', 'pupil1@example.org')
+    persona = tmp_path / 'stage3-persona.md'
+    persona.write_text('Учебный Гусь.')
+    config = replace(config, llm=replace(config.llm, enabled=True, persona_file=persona))
+    bot = GooseClient(config, 'fixture', database)
+    manual = GooseClient(replace(config, resource='desktop'), 'fixture', manual_db)
+    peer = GooseClient(replace(config, jid='pupil1@example.org', resource='phone'), 'fixture', peer_db)
+    model = SimpleNamespace(complete=AsyncMock(return_value='Ответ модели'), close=AsyncMock())
+    engine = Dialogues(config, database, model, bot.prepare_reply)
+    clients = [(bot, bot_manager), (manual, manual_manager), (peer, peer_manager)]
+    try:
+        for client, manager in clients:
+            client.init_plugins()
+            client.ready.set()
+            plugin = client.plugin['xep_0384']
+            monkeypatch.setattr(plugin, 'get_session_manager', AsyncMock(return_value=manager))
+            async def refresh(jids, force_download=False, manager=manager):
+                for jid in jids:
+                    await manager.refresh_device_lists(jid.bare)
+            monkeypatch.setattr(plugin, 'refresh_device_lists', refresh)
+        for manager in (bot_manager, manual_manager, peer_manager):
+            for jid in (config.jid, 'pupil1@example.org'):
+                await manager.refresh_device_lists(jid)
+                for device in await manager.get_device_information(jid):
+                    await set_verified_trust(manager, jid, device.device_id, fingerprint(manager, device))
+        bot.own_device_id = (await bot_manager.get_own_device_information())[0].device_id
+        await engine.initialize()
+        bot.dialogues = bot.commands.dialogues = engine
+        await engine.set_mode('pupil1@example.org', 'auto')
+        await engine.set_mode('pupil2@example.org', 'auto')
+        outgoing = manual.make_message(mto='pupil1@example.org', mtype='chat', mbody='Подсказка владельца')
+        outgoing['from'] = manual.boundjid
+        encrypted, errors = await manual.plugin['xep_0384'].encrypt_message(outgoing, {JID('pupil1@example.org')})
+        assert not errors and encrypted['body'] != 'Подсказка владельца'
+        carbon = carbon_message(encrypted, direction='sent')
+        captured = []
+        monkeypatch.setattr(bot, 'send', lambda stanza, **kwargs: captured.append(stanza))
+        for stanza in ((carbon, encrypted) if carbon_first else (encrypted, carbon)):
+            bot.admit(stanza)
+            while not bot.queue.empty():
+                await bot.process_message(bot.queue.get_nowait())
+        assert await engine.mode('pupil1@example.org') == 'manual'
+        assert await engine.mode('pupil2@example.org') == 'auto'
+        assert await database.history('pupil1@example.org', 100, 24, 30) == [
+            {'role': 'assistant', 'content': 'Подсказка владельца'}]
+        assert not model.complete.called and not captured
+        # Архивная копия уже расшифрованного ratchet не расшифровывается повторно.
+        archived = Message(xml=deepcopy(encrypted.xml))
+        archived['id'] = 'server-changed-id'
+        await bot.restore_message(archived, time.time())
+        assert len(await database.history('pupil1@example.org', 100, 24, 30)) == 1
+        # Новая офлайн-отправка восстанавливается без ответа модели.
+        another = manual.make_message(mto='pupil1@example.org', mtype='chat', mbody='Ещё одна ручная подсказка')
+        another['from'] = manual.boundjid
+        encrypted2, errors = await manual.plugin['xep_0384'].encrypt_message(another, {JID('pupil1@example.org')})
+        assert not errors
+        await bot.restore_message(encrypted2, time.time())
+        assert len(await database.history('pupil1@example.org', 100, 24, 30)) == 2
+        assert not model.complete.called and not captured
+    finally:
+        await engine.close()
+        for _, manager in clients:
+            await manager.shutdown()
