@@ -9,6 +9,7 @@ import time
 
 from .config import ConfigError, bare_jid
 from .model import ModelError
+from .social import LIKE_RULE, answer_metadata
 
 log = logging.getLogger("goose")
 RULES = ("Ты — семейный помощник Гусь, а не родитель. Объясняй учебные задачи понятно, "
@@ -44,6 +45,7 @@ class Job:
     revision: int
     deadline: float
     guard: int = 0
+    message_id: str | None = None
 
 
 @dataclass
@@ -57,9 +59,10 @@ class State:
 
 
 class Dialogues:
-    def __init__(self, config, database, model, prepare_reply, *, clock=time.monotonic):
+    def __init__(self, config, database, model, prepare_reply, *, clock=time.monotonic, social=None):
         self.config, self.database, self.model = config, database, model
         self.prepare_reply, self.clock = prepare_reply, clock
+        self.social = social
         self.states = {jid: State() for jid in config.allowed}
         self.slots = asyncio.Semaphore(config.llm.max_concurrent_requests)
         self.tasks = set()
@@ -89,8 +92,10 @@ class Dialogues:
             raise ConfigError("Диалог вне списка разрешённых аккаунтов.")
         return target
 
-    @staticmethod
-    def _discard(state):
+    def _discard(self, jid):
+        state = self.states[jid]
+        if self.social:
+            self.social.stop_typing(jid)
         state.pending.clear()
         if state.task is not None:
             state.task.cancel()
@@ -105,17 +110,18 @@ class Dialogues:
                 raise ConfigError("Сначала задайте полный профиль пользователя в конфигурации.")
         async with self.states[jid].lock:
             await self.database.set_mode(jid, mode)
-            self._discard(self.states[jid])
+            self._discard(jid)
 
     async def mode(self, jid):
         row = await self.database.dialogue(self._target(jid))
         return row["mode"] + (" (пауза: архив не восстановлен полностью; подтвердите auto)" if row["suspended"] else "")
 
     def hold(self, jid):
-        state = self.states[self._target(jid)]
+        jid = self._target(jid)
+        state = self.states[jid]
         state.holds += 1
         state.guard += 1
-        self._discard(state)
+        self._discard(jid)
 
     def release(self, jid):
         state = self.states[self._target(jid)]
@@ -130,7 +136,7 @@ class Dialogues:
                 jid, keys, kind, body=body if keep_text else None, stamp=stamp, live=live)
             if changed and kind == 'manual' and (await self.database.dialogue(jid))['mode'] == 'manual':
                 state.guard += 1
-                self._discard(state)
+                self._discard(jid)
             return changed
 
     async def archive_failed(self, jid):
@@ -138,21 +144,21 @@ class Dialogues:
         async with self.states[jid].lock:
             await self.database.invalidate_archive(jid)
             self.states[jid].guard += 1
-            self._discard(self.states[jid])
+            self._discard(jid)
 
     async def clear(self, jid):
         jid = self._target(jid)
         async with self.states[jid].lock:
             await self.database.clear_context(jid)
-            self._discard(self.states[jid])
+            self._discard(jid)
 
     async def update_profile(self, jid, name, value):
         jid = self._target(jid)
         async with self.states[jid].lock:
             await self.database.update_profile(jid, name, value)
-            self._discard(self.states[jid])
+            self._discard(jid)
 
-    async def submit(self, jid, body, *, keys=None, stamp=None):
+    async def submit(self, jid, body, *, keys=None, stamp=None, message_id=None):
         jid = bare_jid(jid)
         if (jid not in self.states or not self.config.llm.enabled or not self.model
                 or not body.strip() or len(body) > 2048 or self.closing):
@@ -174,7 +180,7 @@ class Dialogues:
             if not active or state.holds:
                 return
             deadline = self.clock() + self.config.llm.timeout_seconds * 2 + 35
-            state.pending.append(Job(turn, row["revision"], deadline, state.guard))
+            state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id))
             if state.task is None or state.task.done():
                 state.task = asyncio.create_task(self._work(jid, state))
                 self.tasks.add(state.task)
@@ -193,7 +199,8 @@ class Dialogues:
         if profile is None:
             raise ModelError("configuration")
         persona = await asyncio.to_thread(read_persona, self.config.llm.persona_file)
-        prefix = [{"role": "system", "content": RULES + "\n\n" + persona},
+        social_rules = ('\n\n' + LIKE_RULE if self.social and self.social.can_like(jid, job.message_id) else '')
+        prefix = [{"role": "system", "content": RULES + "\n\n" + persona + social_rules},
                   {"role": "system", "content":
                    f"Текущий класс: {profile['grade']}. Учебный год: {profile['academic_year']}. "
                    f"Стиль объяснения: {profile['explanation_style']}."}]
@@ -212,7 +219,7 @@ class Dialogues:
             raise ModelError("context_limit")
         return prefix + history
 
-    async def _deliver(self, jid, state, job, text, *, error=False):
+    async def _deliver(self, jid, state, job, text, *, error=False, like=False):
         if not await self._valid(jid, job):
             return
         if error and self.clock() - state.last_error < 60:
@@ -229,6 +236,8 @@ class Dialogues:
                     return
                 if not send():
                     return
+                if like and not error and self.social:
+                    self.social.react(jid, job.message_id)
                 if error:
                     state.last_error = self.clock()
                 else:
@@ -248,14 +257,21 @@ class Dialogues:
                     if not await self._valid(jid, job):
                         continue
                 try:
+                    token = None
                     remaining = max(0, job.deadline - self.clock())
                     async with asyncio.timeout(remaining):
                         async with self.slots:
                             if not await self._valid(jid, job):
                                 continue
+                            if self.social:
+                                self.social.note_question(jid)
                             context = await self._context(jid, job)
-                            text = await self.model.complete(context)
-                    await self._deliver(jid, state, job, text)
+                            if not await self._valid(jid, job):
+                                continue
+                            if self.social:
+                                token = self.social.start_typing(jid)
+                            text, like = answer_metadata(await self.model.complete(context))
+                    await self._deliver(jid, state, job, text, like=like)
                 except (ModelError, ConfigError, TimeoutError) as exc:
                     code = exc.code if isinstance(exc, ModelError) else "configuration" if isinstance(exc, ConfigError) else "timeout"
                     log.warning("generation_failed reason=%s", code)
@@ -266,6 +282,9 @@ class Dialogues:
                     raise
                 except Exception:
                     log.error("generation_failed reason=internal")
+                finally:
+                    if self.social and token is not None:
+                        self.social.stop_typing(jid, token)
         finally:
             async with state.lock:
                 if state.task is asyncio.current_task():
@@ -273,6 +292,9 @@ class Dialogues:
 
     async def close(self):
         self.closing = True
+        if self.social:
+            for jid in self.states:
+                self.social.stop_typing(jid)
         if self.cleanup:
             self.cleanup.cancel()
         tasks = tuple(self.tasks)

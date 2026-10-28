@@ -65,6 +65,8 @@ def doctor(config):
     else:
         print("SQLite: ещё не создана; идентичность создаст первый запуск сервиса.")
     print("Модель: " + ("включена; auto восстанавливается после проверки архива" if config.llm.enabled else "отключена"))
+    print("Служебный набор: " + ("включён" if config.interaction.typing_enabled else "отключён") +
+          "; реакции: " + ("включены" if config.interaction.reactions_enabled else "отключены"))
     print("Ручная отправка включает manual; неполный архив требует подтверждения auto владельцем.")
     print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
           "; новости: " + ("включены" if config.news.enabled else "отключены") +

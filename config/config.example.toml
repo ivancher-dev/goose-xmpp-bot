@@ -25,6 +25,10 @@ connect_timeout = 45
 [diagnostics]
 echo_enabled = false
 
+[interaction]
+typing_enabled = false
+reactions_enabled = false
+
 [llm]
 enabled = false
 provider = "openai_compatible"
@@ -41,7 +45,8 @@ persona_file = "/etc/goose-xmpp-bot/persona.md"
 
 [memory]
 recent_messages = 24
-context_token_budget = 6000
+# Запас для расширенного образа и двух отдельных ходов истории.
+context_token_budget = 9000
 retention_days = 30
 
 [weather]

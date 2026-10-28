@@ -96,6 +96,12 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True)
+class InteractionConfig:
+    typing_enabled: bool = False
+    reactions_enabled: bool = False
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     enabled: bool = False
     provider: str = "open_meteo"
@@ -134,6 +140,7 @@ class Config:
     memory: MemoryConfig = MemoryConfig()
     weather: WeatherConfig = WeatherConfig()
     news: NewsConfig = NewsConfig()
+    interaction: InteractionConfig = InteractionConfig()
 
     def password(self) -> str:
         value = os.environ.get(self.password_env, "")
@@ -149,7 +156,7 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("Не удалось прочитать TOML-конфигурацию.") from exc
     allowed_top = {"config_version", "timezone", "data_dir", "xmpp", "access", "runtime",
-                   "diagnostics", "users", "llm", "memory", "schedule", "weather", "news"}
+                   "diagnostics", "users", "llm", "memory", "schedule", "weather", "news", "interaction"}
     if data.keys() - allowed_top or type(data.get("config_version")) is not int or data["config_version"] != 1:
         raise ConfigError("Неизвестные поля или неподдерживаемая config_version.")
     timezone = text(data, "timezone")
@@ -318,6 +325,9 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     news_config = NewsConfig(enabled_news, tuple(parsed_sources),
                              limited(news, "limit", 5, 10),
                              limited(news, "max_age_hours", 48, 168))
+    interaction = table(data, 'interaction', {'typing_enabled', 'reactions_enabled'})
+    interaction_config = InteractionConfig(typed(interaction, 'typing_enabled', bool, False),
+                                           typed(interaction, 'reactions_enabled', bool, False))
     return Config(jid, resource, password_env, data_dir, timezone, admins, allowed,
                   profiles, echo, level, attempts, timeout, llm_config, memory_config,
-                  weather_config, news_config)
+                  weather_config, news_config, interaction_config)
