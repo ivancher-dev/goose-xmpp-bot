@@ -27,6 +27,7 @@ from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
 from .social import Social, reaction_id
 from .lifecycle import notify_ready
+from .retry import temporary_xmpp_error
 
 log = logging.getLogger("goose")
 CARBONS = "urn:xmpp:carbons:2"
@@ -181,8 +182,9 @@ class GooseClient(ClientXMPP):
         self.ready.clear()
         self.ended.set()
 
-    def on_initialization_failure(self, _):
+    def on_initialization_failure(self, temporary):
         self.failed = self.fatal = True
+        self.retryable_initialization = temporary is True
         self.failure_reason = "Не удалось инициализировать OMEMO; проверьте PEP, сеть и хранилище."
         log.error("omemo_initialization_failed")
         self.ended.set()
@@ -217,10 +219,10 @@ class GooseClient(ClientXMPP):
                 try:
                     self.manager = await self.plugin["xep_0384"].get_session_manager()
                     self.own_device_id = (await self.manager.get_own_device_information())[0].device_id
-                except Exception:
+                except Exception as exc:
                     # Ошибка библиотеки после частичной инициализации завершается
                     # выходом процесса: asyncio.run отменит и её внутренние задачи.
-                    self.on_initialization_failure(None)
+                    self.on_initialization_failure(temporary_xmpp_error(exc))
                     raise
                 if self.serving_commands:
                     self.own_events = dict.fromkeys(await self.database.owner_event_keys())
@@ -578,6 +580,9 @@ async def run_sessions(config, database, stop, action=None, *, probe=False, clie
             if stop.is_set():
                 return
             if client.fatal:
+                if getattr(client, 'retryable_initialization', False):
+                    # Частично созданный OMEMO-менеджер не используем повторно.
+                    raise TransientError('Временный сетевой сбой при инициализации OMEMO; нужен новый процесс.')
                 raise ConfigError(getattr(client, "failure_reason", None)
                                   or "Ошибка авторизации XMPP; проверьте учётную запись.")
         finally:

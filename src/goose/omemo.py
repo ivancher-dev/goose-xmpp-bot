@@ -11,6 +11,7 @@ from slixmpp.plugins import register_plugin
 from slixmpp_omemo import TrustLevel, XEP_0384
 
 from .config import ConfigError
+from .retry import temporary_xmpp_error
 
 LEGACY_NS = "eu.siacs.conversations.axolotl"
 
@@ -36,8 +37,8 @@ class GooseOmemo(XEP_0384):
                 await self.get_session_manager()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                self.xmpp.event("goose_omemo_failed")
+            except Exception as exc:
+                self.xmpp.event("goose_omemo_failed", temporary_xmpp_error(exc))
         self.initialization_task = asyncio.create_task(initialize())
 
     async def get_session_manager(self):

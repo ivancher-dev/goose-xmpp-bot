@@ -225,6 +225,8 @@ async def test_deleted_anchor_requires_new_confirmation_and_can_recover_after_it
     await client.archive.synchronize(startup=True)
     assert 'пауза' in await client.dialogues.mode(CHILD)
     assert (await database.archive_cursor(CHILD))['confirmed'] == 0
+    await client.archive.synchronize()
+    assert 'подтвердите auto' in await client.dialogues.mode(CHILD)
     await client.dialogues.set_mode(CHILD, 'auto')
     await restart(client)
     await client.archive.synchronize(startup=True)
@@ -359,6 +361,8 @@ async def test_startup_buffers_live_messages_and_manual_hold_precedes_auto_resto
     await client.dialogues.close()
     client.dialogues = None
     client.ready.clear()
+    notifications = []
+    monkeypatch.setattr('goose.transport.notify_ready', lambda: notifications.append(client.ready.is_set()))
     entered, release = asyncio.Event(), asyncio.Event()
     original = Iq.send
     async def delayed(iq, **kwargs):
@@ -380,6 +384,7 @@ async def test_startup_buffers_live_messages_and_manual_hold_precedes_auto_resto
     starting = asyncio.create_task(client.on_start(None))
     await asyncio.wait_for(entered.wait(), 1)
     assert not client.ready.is_set()
+    assert not notifications
     client.admit(event(CHILD + '/phone', OWN, 'Новый вопрос', ident='during-start'))
     client.admit(sent_carbon(event(OWN + '/phone', CHILD, 'Отвечу сам', ident='takeover-during-start')))
     assert client.queue.qsize() == 2 and client.holds[CHILD] == 1
@@ -387,6 +392,7 @@ async def test_startup_buffers_live_messages_and_manual_hold_precedes_auto_resto
     await asyncio.wait_for(starting, 2)
     await asyncio.wait_for(client.queue.join(), 1)
     assert client.ready.is_set() and await client.dialogues.mode(CHILD) == 'manual'
+    assert notifications == [True]
     assert not sent
 
 

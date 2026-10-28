@@ -204,6 +204,14 @@ def inspect(venv, runner=run):
     return json.loads(runner([venv / "bin/python", "-c", INSPECT]))
 
 
+def readable_release(release):
+    """Как chmod a+rX: сохраняем исполняемость скриптов для пользователя службы."""
+    for path in release.rglob('*'):
+        if not path.is_symlink():
+            mode = path.stat().st_mode
+            path.chmod(mode | (0o555 if path.is_dir() or mode & 0o111 else 0o444))
+
+
 def doctor(venv, paths, *, local, runner=run):
     args = [venv / "bin/python", "-m", "goose.cli", "doctor", "--config", paths["config"]]
     if not local:
@@ -270,7 +278,8 @@ def install_launcher(source, paths, local):
     target = paths["prefix"] / "bin/goose-update" if local else Path("/usr/local/sbin/goose-update")
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     code = (source / "src/goose/maintenance.py").read_text()
-    code = code.replace('DEFAULT_PREFIX = "/opt/goose-xmpp-bot"', f'DEFAULT_PREFIX = {str(paths["prefix"])!r}')
+    code = code.replace('DEFAULT_PREFIX = "/opt/goose-xmpp-bot"', f'DEFAULT_PREFIX = {str(paths["prefix"])!r}', 1)
+    compile(code, str(target), 'exec')
     atomic_write(target, code.encode(), 0o755)
 
 
@@ -351,9 +360,7 @@ class Updater:
                       "--no-build-isolation", "--no-deps", source], timeout=300)
             self.run([venv / "bin/python", "-m", "pip", "check"])
             # Сервис читает root-owned код; секретов внутри release нет.
-            for p in release.rglob("*"):
-                if not p.is_symlink():
-                    p.chmod(p.stat().st_mode | (0o555 if p.is_dir() else 0o444))
+            readable_release(release)
             doctor(venv, self.paths, local=self.meta["local"], runner=self.run)
             candidate_unit = release / UNIT
             atomic_write(candidate_unit, unit, 0o644)

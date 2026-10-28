@@ -12,6 +12,7 @@ from slixmpp.exceptions import IqError, IqTimeout
 
 from .config import bare_jid
 from .events import DELAY, FORWARD, ordinary_message
+from .retry import temporary_xmpp_error
 
 log = logging.getLogger('goose')
 MAM = 'urn:xmpp:mam:2'
@@ -202,10 +203,7 @@ class ArchiveSync:
                 raise
             except Exception as exc:
                 self.states[peer] = 'incomplete'
-                temporary = isinstance(exc, (TimeoutError, IqTimeout, ConnectionError, OSError))
-                if isinstance(exc, IqError):
-                    temporary = exc.iq['error']['condition'] in {
-                        'service-unavailable', 'remote-server-timeout', 'resource-constraint', 'internal-server-error'}
+                temporary = temporary_xmpp_error(exc)
                 await self.client.dialogues.archive_failed(peer, transient=temporary)
                 if temporary:
                     # Подтверждённый anchor не теряем из-за краткого сбоя сети.

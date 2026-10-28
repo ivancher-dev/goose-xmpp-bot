@@ -332,12 +332,27 @@ def test_adoption_installs_standalone_launcher_without_touching_legacy_code(inst
     launcher = x.paths['prefix'] / 'bin/goose-update'
     assert launcher.stat().st_mode & 0o777 == 0o755
     assert f"DEFAULT_PREFIX = {str(x.paths['prefix'])!r}" in launcher.read_text()
+    compile(launcher.read_text(), str(launcher), 'exec')
     assert (x.updater.active / 'bin/python').read_text() == 'old'
     assert contents(x.paths) == before and not x.system.events
     metadata = (x.paths['prefix'] / 'maintenance.json').read_bytes()
     with pytest.raises(m.UpdateError, match='уже настроен'):
         m.bootstrap(root, x.paths['prefix'], x.paths['config'], x.paths['data'], x.paths['env'], True)
     assert (x.paths['prefix'] / 'maintenance.json').read_bytes() == metadata
+
+
+def test_private_build_scripts_become_executable_for_service_user(tmp_path):
+    release = tmp_path / 'release'
+    (release / 'bin').mkdir(parents=True, mode=0o700)
+    script, module = release / 'bin/goose-bot', release / 'module.py'
+    script.write_text('#!/usr/bin/env python3.12\n')
+    script.chmod(0o700)
+    module.write_text('version=1\n')
+    module.chmod(0o600)
+    m.readable_release(release)
+    assert script.stat().st_mode & 0o777 == 0o755
+    assert module.stat().st_mode & 0o777 == 0o644
+    assert (release / 'bin').stat().st_mode & 0o777 == 0o755
 
 
 def test_notify_uses_unix_socket_and_never_includes_configuration(tmp_path, monkeypatch):

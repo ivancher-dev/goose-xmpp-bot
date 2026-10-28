@@ -483,6 +483,19 @@ async def test_auth_failure_not_retried(config, monkeypatch):
     client.close.assert_awaited_once()
 
 
+async def test_temporary_omemo_initialization_exits_for_fresh_process(config, monkeypatch):
+    from goose.config import TransientError
+    monkeypatch.setenv(config.password_env, 'test-only')
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), fatal=True,
+                             retryable_initialization=True, close=AsyncMock())
+    client.connect = lambda: client.ended.set()
+    factory = Mock(return_value=client)
+    with pytest.raises(TransientError, match='новый процесс'):
+        await run_sessions(config, None, asyncio.Event(), client_factory=factory)
+    factory.assert_called_once()
+    client.close.assert_awaited_once()
+
+
 async def test_stop_closes_running_session(config, monkeypatch):
     monkeypatch.setenv(config.password_env, "test-only")
     stop = asyncio.Event()
