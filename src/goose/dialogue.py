@@ -46,6 +46,7 @@ class Job:
     deadline: float
     guard: int = 0
     message_id: str | None = None
+    typing_target: str | None = None
 
 
 @dataclass
@@ -170,6 +171,8 @@ class Dialogues:
                 or not body.strip() or len(body) > 2048 or self.closing):
             return
         state = self.states[jid]
+        # Захватываем устройство до первого await: другой клиент не меняет адрес задания.
+        typing_target = self.social.typing_target(jid) if self.social else None
         async with state.lock:
             row = await self.database.dialogue(jid)
             active = row["mode"] == "auto" and not row["suspended"] and not state.holds
@@ -186,7 +189,7 @@ class Dialogues:
             if not active or state.holds:
                 return
             deadline = self.clock() + self.config.llm.timeout_seconds * 2 + 35
-            state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id))
+            state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id, typing_target))
             if state.task is None or state.task.done():
                 state.task = asyncio.create_task(self._work(jid, state))
                 self.tasks.add(state.task)
@@ -275,7 +278,7 @@ class Dialogues:
                             if not await self._valid(jid, job):
                                 continue
                             if self.social:
-                                token = self.social.start_typing(jid)
+                                token = self.social.start_typing(jid, target=job.typing_target)
                             text, like = answer_metadata(await self.model.complete(context))
                     await self._deliver(jid, state, job, text, like=like)
                 except (ModelError, ConfigError, TimeoutError) as exc:

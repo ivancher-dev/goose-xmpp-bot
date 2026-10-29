@@ -25,7 +25,7 @@ from .events import SID, message_keys, ordinary_message, owner_stanza, social_on
 from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
-from .social import Social, reaction_id
+from .social import Social, chatstate_notification, reaction_id
 from .lifecycle import notify_ready
 from .retry import temporary_xmpp_error
 
@@ -62,13 +62,15 @@ def classify(stanza, own_jid):
     return "direct"
 
 
-def incoming_stanza(stanza, own_jid):
+def incoming_stanza(stanza, own_jid, *, metadata=False):
     """Принять только прямую доставку или проверенную живую received-копию.
 
     Авторизация выполняется по внутреннему from, после расшифровки дополнительно
     проверяется устройство. Внешний from Carbons обязан быть точным bare JID бота.
     """
     reason = classify(stanza, own_jid)
+    if metadata and reason == 'service' and chatstate_notification(stanza):
+        reason = 'direct'
     if reason != "carbon":
         return (stanza, reason) if reason == "direct" else (None, reason)
     if str(stanza["from"]) != own_jid or stanza["type"] not in {"chat", "normal"}:
@@ -93,6 +95,8 @@ def incoming_stanza(stanza, own_jid):
     except ConfigError:
         return None, "invalid-carbon"
     inner_reason = classify(inner, own_jid)
+    if metadata and inner_reason == 'service' and chatstate_notification(inner):
+        inner_reason = 'direct'
     if inner_reason != "direct":
         return None, inner_reason
     return inner, "received-carbon"
@@ -311,11 +315,14 @@ class GooseClient(ClientXMPP):
                 self.ended.set()
                 log.warning('manual_message_overflow')
             return
-        incoming, reason = incoming_stanza(stanza, self.config.jid)
+        incoming, reason = incoming_stanza(stanza, self.config.jid, metadata=True)
         if incoming is None:
             log.info("message_ignored reason=%s", reason)
             return
         if bare_jid(str(incoming["from"])) not in self.config.allowed:
+            return
+        if chatstate_notification(incoming):
+            self.social.observe_notification(incoming)
             return
         try:
             self.queue.put_nowait(incoming)
