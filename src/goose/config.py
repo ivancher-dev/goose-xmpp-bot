@@ -15,6 +15,10 @@ class ConfigError(ValueError):
     pass
 
 
+class TransientError(ConfigError):
+    """Временный отказ: systemd может повторить запуск с паузой."""
+
+
 def bare_jid(value: str, *, allow_resource: bool = True) -> str:
     try:
         jid = JID(value)

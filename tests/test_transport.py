@@ -451,6 +451,7 @@ async def test_missing_password_does_not_construct_client(config, monkeypatch):
 
 
 async def test_retries_bounded_and_close_each_client(config, monkeypatch):
+    from goose.config import TransientError
     monkeypatch.setenv(config.password_env, "test-only")
     clients = []
     class FailingClient:
@@ -465,7 +466,7 @@ async def test_retries_bounded_and_close_each_client(config, monkeypatch):
         args[0].close()
         raise TimeoutError
     monkeypatch.setattr(asyncio, "wait_for", immediate_timeout)
-    with pytest.raises(ConfigError, match="Исчерпаны"):
+    with pytest.raises(TransientError, match="Исчерпаны"):
         await run_sessions(config, None, asyncio.Event(), client_factory=FailingClient)
     assert len(clients) == config.max_attempts
     assert all(c.close.await_count == 1 for c in clients)
@@ -477,6 +478,19 @@ async def test_auth_failure_not_retried(config, monkeypatch):
     client.connect = lambda: client.ended.set()
     factory = Mock(return_value=client)
     with pytest.raises(ConfigError, match="авторизации"):
+        await run_sessions(config, None, asyncio.Event(), client_factory=factory)
+    factory.assert_called_once()
+    client.close.assert_awaited_once()
+
+
+async def test_temporary_omemo_initialization_exits_for_fresh_process(config, monkeypatch):
+    from goose.config import TransientError
+    monkeypatch.setenv(config.password_env, 'test-only')
+    client = SimpleNamespace(ready=asyncio.Event(), ended=asyncio.Event(), fatal=True,
+                             retryable_initialization=True, close=AsyncMock())
+    client.connect = lambda: client.ended.set()
+    factory = Mock(return_value=client)
+    with pytest.raises(TransientError, match='новый процесс'):
         await run_sessions(config, None, asyncio.Event(), client_factory=factory)
     factory.assert_called_once()
     client.close.assert_awaited_once()
@@ -508,6 +522,16 @@ def test_cli_missing_password_is_redacted(config_file, monkeypatch, capsys):
     monkeypatch.delenv("GOOSE_XMPP_PASSWORD", raising=False)
     assert main(["run", "--config", str(config_file)]) == 2
     assert "Пароль XMPP" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('temporary,code', [(True, 75), (False, 2)])
+def test_cli_distinguishes_retryable_failure_from_fatal_configuration(config_file, monkeypatch, capsys, temporary, code):
+    from goose.config import TransientError
+    async def fail(*args):
+        raise (TransientError if temporary else ConfigError)('Подставная ошибка')
+    monkeypatch.setattr('goose.cli.execute', fail)
+    assert main(['run', '--config', str(config_file)]) == code
+    assert 'Подставная ошибка' in capsys.readouterr().err
 
 
 def test_cli_permission_error_has_safe_message(config_file, monkeypatch, capsys):

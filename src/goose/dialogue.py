@@ -46,6 +46,7 @@ class Job:
     deadline: float
     guard: int = 0
     message_id: str | None = None
+    typing_target: str | None = None
 
 
 @dataclass
@@ -113,8 +114,14 @@ class Dialogues:
             self._discard(jid)
 
     async def mode(self, jid):
-        row = await self.database.dialogue(self._target(jid))
-        return row["mode"] + (" (пауза: архив не восстановлен полностью; подтвердите auto)" if row["suspended"] else "")
+        jid = self._target(jid)
+        row = await self.database.dialogue(jid)
+        if not row['suspended']:
+            return row['mode']
+        cursor = await self.database.archive_cursor(jid)
+        note = ('ожидается полный архив; auto возобновится после проверки'
+                if cursor and cursor['confirmed'] else 'архив не восстановлен полностью; подтвердите auto')
+        return row['mode'] + ' (пауза: ' + note + ')'
 
     def hold(self, jid):
         jid = self._target(jid)
@@ -139,10 +146,10 @@ class Dialogues:
                 self._discard(jid)
             return changed
 
-    async def archive_failed(self, jid):
+    async def archive_failed(self, jid, *, transient=False):
         jid = self._target(jid)
         async with self.states[jid].lock:
-            await self.database.invalidate_archive(jid)
+            await self.database.invalidate_archive(jid, transient=transient)
             self.states[jid].guard += 1
             self._discard(jid)
 
@@ -164,6 +171,8 @@ class Dialogues:
                 or not body.strip() or len(body) > 2048 or self.closing):
             return
         state = self.states[jid]
+        # Захватываем устройство до первого await: другой клиент не меняет адрес задания.
+        typing_target = self.social.typing_target(jid) if self.social else None
         async with state.lock:
             row = await self.database.dialogue(jid)
             active = row["mode"] == "auto" and not row["suspended"] and not state.holds
@@ -180,7 +189,7 @@ class Dialogues:
             if not active or state.holds:
                 return
             deadline = self.clock() + self.config.llm.timeout_seconds * 2 + 35
-            state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id))
+            state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id, typing_target))
             if state.task is None or state.task.done():
                 state.task = asyncio.create_task(self._work(jid, state))
                 self.tasks.add(state.task)
@@ -269,7 +278,7 @@ class Dialogues:
                             if not await self._valid(jid, job):
                                 continue
                             if self.social:
-                                token = self.social.start_typing(jid)
+                                token = self.social.start_typing(jid, target=job.typing_target)
                             text, like = answer_metadata(await self.model.complete(context))
                     await self._deliver(jid, state, job, text, like=like)
                 except (ModelError, ConfigError, TimeoutError) as exc:

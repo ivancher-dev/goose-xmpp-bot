@@ -17,7 +17,7 @@ from slixmpp.xmlstream.matcher import MatchXPath
 
 from .commands import Commands
 from .archive import ArchiveError, ArchiveSync
-from .config import ConfigError, bare_jid
+from .config import ConfigError, TransientError, bare_jid
 from .dialogue import Dialogues
 from .facts import Facts
 from .facts import intent as facts_intent
@@ -25,7 +25,9 @@ from .events import SID, message_keys, ordinary_message, owner_stanza, social_on
 from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
 from .storage import OmemoStorage
-from .social import Social, reaction_id
+from .social import Social, chatstate_notification, reaction_id
+from .lifecycle import notify_ready
+from .retry import temporary_xmpp_error
 
 log = logging.getLogger("goose")
 CARBONS = "urn:xmpp:carbons:2"
@@ -60,13 +62,15 @@ def classify(stanza, own_jid):
     return "direct"
 
 
-def incoming_stanza(stanza, own_jid):
+def incoming_stanza(stanza, own_jid, *, metadata=False):
     """Принять только прямую доставку или проверенную живую received-копию.
 
     Авторизация выполняется по внутреннему from, после расшифровки дополнительно
     проверяется устройство. Внешний from Carbons обязан быть точным bare JID бота.
     """
     reason = classify(stanza, own_jid)
+    if metadata and reason == 'service' and chatstate_notification(stanza):
+        reason = 'direct'
     if reason != "carbon":
         return (stanza, reason) if reason == "direct" else (None, reason)
     if str(stanza["from"]) != own_jid or stanza["type"] not in {"chat", "normal"}:
@@ -91,6 +95,8 @@ def incoming_stanza(stanza, own_jid):
     except ConfigError:
         return None, "invalid-carbon"
     inner_reason = classify(inner, own_jid)
+    if metadata and inner_reason == 'service' and chatstate_notification(inner):
+        inner_reason = 'direct'
     if inner_reason != "direct":
         return None, inner_reason
     return inner, "received-carbon"
@@ -180,8 +186,9 @@ class GooseClient(ClientXMPP):
         self.ready.clear()
         self.ended.set()
 
-    def on_initialization_failure(self, _):
+    def on_initialization_failure(self, temporary):
         self.failed = self.fatal = True
+        self.retryable_initialization = temporary is True
         self.failure_reason = "Не удалось инициализировать OMEMO; проверьте PEP, сеть и хранилище."
         log.error("omemo_initialization_failed")
         self.ended.set()
@@ -216,10 +223,10 @@ class GooseClient(ClientXMPP):
                 try:
                     self.manager = await self.plugin["xep_0384"].get_session_manager()
                     self.own_device_id = (await self.manager.get_own_device_information())[0].device_id
-                except Exception:
+                except Exception as exc:
                     # Ошибка библиотеки после частичной инициализации завершается
                     # выходом процесса: asyncio.run отменит и её внутренние задачи.
-                    self.on_initialization_failure(None)
+                    self.on_initialization_failure(temporary_xmpp_error(exc))
                     raise
                 if self.serving_commands:
                     self.own_events = dict.fromkeys(await self.database.owner_event_keys())
@@ -242,6 +249,8 @@ class GooseClient(ClientXMPP):
                     self.worker = asyncio.create_task(self.process_queue())
                     self.archive.start()
             self.ready.set()
+            if self.serving_commands:
+                notify_ready()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
         except asyncio.CancelledError:
             raise
@@ -306,11 +315,14 @@ class GooseClient(ClientXMPP):
                 self.ended.set()
                 log.warning('manual_message_overflow')
             return
-        incoming, reason = incoming_stanza(stanza, self.config.jid)
+        incoming, reason = incoming_stanza(stanza, self.config.jid, metadata=True)
         if incoming is None:
             log.info("message_ignored reason=%s", reason)
             return
         if bare_jid(str(incoming["from"])) not in self.config.allowed:
+            return
+        if chatstate_notification(incoming):
+            self.social.observe_notification(incoming)
             return
         try:
             self.queue.put_nowait(incoming)
@@ -575,6 +587,9 @@ async def run_sessions(config, database, stop, action=None, *, probe=False, clie
             if stop.is_set():
                 return
             if client.fatal:
+                if getattr(client, 'retryable_initialization', False):
+                    # Частично созданный OMEMO-менеджер не используем повторно.
+                    raise TransientError('Временный сетевой сбой при инициализации OMEMO; нужен новый процесс.')
                 raise ConfigError(getattr(client, "failure_reason", None)
                                   or "Ошибка авторизации XMPP; проверьте учётную запись.")
         finally:
@@ -585,4 +600,4 @@ async def run_sessions(config, database, stop, action=None, *, probe=False, clie
                 await asyncio.wait_for(stop.wait(), min(2 ** attempt, 8))
             if stop.is_set():
                 return
-    raise ConfigError("Исчерпаны ограниченные попытки XMPP; проверьте TLS, сеть и настройки.")
+    raise TransientError("Исчерпаны ограниченные попытки XMPP; проверьте TLS и доступность сервера.")

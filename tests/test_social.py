@@ -15,7 +15,8 @@ from goose.config import ConfigError, InteractionConfig, load_config
 from goose.dialogue import Dialogues
 from goose.events import ordinary_message, owner_stanza
 from goose.model import ModelError
-from goose.social import CHATSTATES, LIKE, LIKE_INTERVAL, LIKE_RULE, REACTIONS, Social, answer_metadata, reaction_id
+from goose.social import (CHATSTATES, LIKE, LIKE_INTERVAL, LIKE_RULE, REACTIONS, MAX_RESOURCES,
+                          NEGOTIATION_TTL, Social, answer_metadata, reaction_id)
 from goose.transport import GooseClient
 
 from test_takeover import CHILD, OTHER, OWN, drain, event as base_event, idle, running, sent_carbon
@@ -54,7 +55,19 @@ def reactions(sent):
 
 
 def states(sent, jid=CHILD):
-    return [m['chat_state'] for m in sent if str(m['to']) == jid and m['chat_state']]
+    return [m['chat_state'] for m in sent if m['chat_state']
+            and (str(m['to']) == jid or ('/' not in jid and m['to'].bare == jid))]
+
+
+def notification(sender, recipient=OWN, name='active'):
+    packet = base_event(sender, recipient, '', encrypted=False)
+    ET.SubElement(packet.xml, f'{{{CHATSTATES}}}{name}')
+    ET.SubElement(packet.xml, '{urn:xmpp:hints}no-store')
+    return packet
+
+
+def standalone_states(sent):
+    return [(str(m['to']), m['chat_state']) for m in sent if m['chat_state'] and not m['body']]
 
 
 async def test_typing_during_api_and_stop_after_encrypted_answer(social):
@@ -68,10 +81,12 @@ async def test_typing_during_api_and_stop_after_encrypted_answer(social):
     await client.process_message(event(CHILD + '/phone', OWN, 'Почему получается так?', ident='wire-id'))
     await asyncio.wait_for(entered.wait(), 1)
     assert states(sent) == ['composing']
+    assert standalone_states(sent) == [(CHILD + '/phone', 'composing')]
     assert not reactions(sent)
     release.set()
     await idle(client)
     assert states(sent)[-1] == 'active'
+    assert standalone_states(sent)[-1] == (CHILD + '/phone', 'active')
     assert reactions(sent)[0]['reactions']['id'] == 'wire-id'
     assert reactions(sent)[0]['reactions']['values'] == {'👍'}
     assert plugin.encrypt_message.await_args.args[0]['body'] == 'Ответ по существу.'
@@ -395,6 +410,120 @@ async def test_peer_can_disable_and_enable_chat_states_without_losing_answers(so
     await idle(client)
     assert states(sent)[0] == 'composing' and states(sent)[-1] == 'active'
     assert model.complete.await_count == 2
+
+
+@pytest.mark.parametrize('carbon', [False, True])
+async def test_standalone_negotiation_then_omemo_without_state_reaches_phone(social, carbon_message, carbon):
+    client, model, _, sent, _ = social
+    packet = notification(CHILD + '/phone')
+    client.admit(carbon_message(packet) if carbon else packet)
+    assert not client.queue.qsize() and not client.holds and not sent
+    model.complete.assert_not_called()
+    assert await client.database.history(CHILD, 100, 24, 30) == []
+    await client.process_message(base_event(CHILD + '/phone', OWN, 'Длинный вопрос', ident='phone-no-active'))
+    await idle(client)
+    assert standalone_states(sent) == [(CHILD + '/phone', 'composing'), (CHILD + '/phone', 'active')]
+    assert model.complete.await_count == 1 and await client.dialogues.mode(CHILD) == 'auto'
+
+
+@pytest.mark.parametrize('case', ['foreign', 'wrong-recipient', 'delayed', 'archived', 'nested', 'unknown',
+                                 'multiple', 'encrypted', 'body', 'bad-carbon', 'sent-carbon'])
+async def test_invalid_metadata_never_negotiates_or_starts_commands(social, carbon_message, case):
+    client, model, _, sent, _ = social
+    packet = notification(CHILD + '/phone')
+    if case == 'foreign':
+        packet['from'] = 'stranger@example.org/phone'
+    elif case == 'wrong-recipient':
+        packet['to'] = 'other-bot@example.org'
+    elif case == 'delayed':
+        ET.SubElement(packet.xml, '{urn:xmpp:delay}delay')
+    elif case == 'archived':
+        ET.SubElement(packet.xml, '{urn:xmpp:mam:2}result')
+    elif case == 'nested':
+        ET.SubElement(packet.xml, '{urn:xmpp:forward:0}forwarded')
+    elif case == 'unknown':
+        packet.xml.find(f'{{{CHATSTATES}}}active').tag = f'{{{CHATSTATES}}}unexpected'
+    elif case == 'multiple':
+        ET.SubElement(packet.xml, f'{{{CHATSTATES}}}composing')
+    elif case == 'encrypted':
+        ET.SubElement(packet.xml, '{eu.siacs.conversations.axolotl}encrypted')
+    elif case == 'body':
+        packet['body'] = '!admin mode pupil1@example.org auto'
+    elif case == 'bad-carbon':
+        packet = carbon_message(packet, sender='stranger@example.org')
+    else:
+        packet = carbon_message(packet, direction='sent')
+    client.admit(packet)
+    await drain(client)
+    assert not client.social.states[CHILD].notifications
+    assert not client.holds and not sent and not model.complete.called
+    assert await client.database.history(CHILD, 100, 24, 30) == []
+
+
+@pytest.mark.parametrize('reason', ['different-resource', 'expired'])
+async def test_negotiation_is_scoped_to_resource_and_expires(social, reason):
+    client, model, _, sent, now = social
+    client.admit(notification(CHILD + '/phone'))
+    source = CHILD + '/desktop'
+    if reason == 'expired':
+        source = CHILD + '/phone'
+        now[0] += NEGOTIATION_TTL + 1
+    await client.process_message(base_event(source, OWN, 'Вопрос', ident='no-consent'))
+    await idle(client)
+    assert not standalone_states(sent) and model.complete.await_count == 1
+
+
+async def test_metadata_cache_is_bounded_and_is_not_authorization(social):
+    client, model, plugin, sent, _ = social
+    for i in range(MAX_RESOURCES * 3):
+        client.admit(notification(CHILD + f'/device-{i}'))
+    assert len(client.social.states[CHILD].notifications) == MAX_RESOURCES
+    original = plugin.decrypt_message.side_effect
+    async def untrusted(stanza):
+        text, device = await original(stanza)
+        device.trust_level_name = 'UNDECIDED'
+        return text, device
+    plugin.decrypt_message.side_effect = untrusted
+    await client.process_message(base_event(CHILD + f'/device-{MAX_RESOURCES * 3 - 1}', OWN, 'Вопрос'))
+    assert not model.complete.called and not sent
+
+
+async def test_queued_phone_and_desktop_keep_their_own_typing_targets(social):
+    client, model, _, sent, _ = social
+    for _ in range(client.config.llm.max_concurrent_requests):
+        await client.dialogues.slots.acquire()
+    try:
+        await client.process_message(event(CHILD + '/phone', OWN, 'Первый вопрос', ident='phone-first'))
+        await client.process_message(event(CHILD + '/desktop', OWN, 'Второй вопрос', ident='desktop-second'))
+    finally:
+        for _ in range(client.config.llm.max_concurrent_requests):
+            client.dialogues.slots.release()
+    await idle(client)
+    assert standalone_states(sent) == [
+        (CHILD + '/phone', 'composing'), (CHILD + '/phone', 'active'),
+        (CHILD + '/desktop', 'composing'), (CHILD + '/desktop', 'active')]
+    assert model.complete.await_count == 2
+    assert all(str(m['to']) == CHILD for m in sent if m['body'])
+
+
+async def test_active_ends_on_original_device_after_other_device_disables_status(social):
+    client, _, _, sent, _ = social
+    client.social.observe(CHILD, event(CHILD + '/phone', OWN))
+    token = client.social.start_typing(CHILD)
+    client.social.observe(CHILD, base_event(CHILD + '/desktop', OWN))
+    client.social.stop_typing(CHILD, token)
+    assert standalone_states(sent) == [(CHILD + '/phone', 'composing'), (CHILD + '/phone', 'active')]
+
+
+async def test_chatstate_diagnostics_never_log_endpoint_or_question(social, caplog):
+    client, _, _, _, _ = social
+    with caplog.at_level('INFO', logger='goose'):
+        await client.process_message(event(CHILD + '/private-resource', OWN, 'private-question', ident='private-id'))
+        await idle(client)
+    messages = '\n'.join(r.getMessage() for r in caplog.records if r.name == 'goose')
+    assert 'chatstate_negotiated supported=True resource=True' in messages
+    assert 'chatstate_sent state=composing' in messages and 'chatstate_sent state=active' in messages
+    assert all(value not in messages for value in (CHILD, 'private-resource', 'private-question', 'private-id'))
 
 
 @pytest.mark.parametrize('mode', ['probe', 'maintenance'])

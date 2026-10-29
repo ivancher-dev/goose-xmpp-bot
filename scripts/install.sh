@@ -59,6 +59,10 @@ if sys.argv[6] == 'false':
         raise SystemExit('Пути systemd-установки скрыты ProtectHome/PrivateTmp; используйте /opt, /etc, /var/lib.')
 PY
 mkdir -p -- "$prefix" "$data_dir"
+if [[ -L "$prefix/venv" || -f "$prefix/maintenance.json" ]]; then
+    echo 'Установка уже обслуживается обновлятором. Используйте sudo goose-update.' >&2
+    exit 2
+fi
 for parent in "$(dirname -- "$config")" "$(dirname -- "$env_file")"; do
     if [[ ! -d "$parent" ]]; then
         mkdir -p -- "$parent"
@@ -126,7 +130,14 @@ fi
         runuser -u goose-xmpp-bot -- "$prefix/venv/bin/goose-bot" doctor --config "$config"
     fi
 )
+"$prefix/venv/bin/python" - "$source_dir" "$prefix" "$config" "$data_dir" "$env_file" "$local_install" <<'PY'
+from pathlib import Path
+import sys
+from goose.maintenance import bootstrap
+bootstrap(*map(lambda p: Path(p).resolve(), sys.argv[1:6]), sys.argv[6] == 'true')
+PY
 echo 'Файлы установлены; настройки и существующие ключи сохранены.'
+echo 'Последующие обновления: sudo goose-update (копия перед переключением создаётся автоматически).'
 echo 'Перед запуском заполните тестовые JID, allowlist и защищённый файл окружения.'
 if $start; then
     # systemd читает защищённый EnvironmentFile; секрет не попадает в argv.
