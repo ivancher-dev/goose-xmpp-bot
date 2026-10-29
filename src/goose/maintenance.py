@@ -6,7 +6,7 @@
 """
 
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -101,7 +101,7 @@ def schema(directory):
     if not path.exists():
         return 0
     plain_file(path)
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise UpdateError("SQLite не прошла проверку целостности.")
         return db.execute("PRAGMA user_version").fetchone()[0]
@@ -281,6 +281,24 @@ def install_launcher(source, paths, local):
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     code = (source / "src/goose/maintenance.py").read_text()
     code = code.replace('DEFAULT_PREFIX = "/opt/goose-xmpp-bot"', f'DEFAULT_PREFIX = {str(paths["prefix"])!r}', 1)
+    compile(code, str(target), 'exec')
+    atomic_write(target, code.encode(), 0o755)
+    code_dir = source / 'src/goose'
+    if (code_dir / 'backup.py').is_file():
+        install_backup_launcher(code_dir, paths['prefix'], local)
+
+
+def install_backup_launcher(code_dir, prefix, local):
+    """Стабильные служебные команды: копии не импортируют переключаемый venv."""
+    target = prefix / 'bin/goose-backup' if local else Path('/usr/local/sbin/goose-backup')
+    target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    helper = (code_dir / 'maintenance.py').read_bytes()
+    compile(helper, str(prefix / 'backup-maintenance.py'), 'exec')
+    atomic_write(prefix / 'backup-maintenance.py', helper, 0o644)
+    for name in ('goose-xmpp-bot-backup.service.in', 'goose-xmpp-bot-backup.timer.in'):
+        atomic_write(prefix / name, (code_dir / 'systemd' / name).read_bytes(), 0o644)
+    code = (code_dir / 'backup.py').read_text()
+    code = code.replace('DEFAULT_PREFIX = "/opt/goose-xmpp-bot"', f'DEFAULT_PREFIX = {str(prefix)!r}', 1)
     compile(code, str(target), 'exec')
     atomic_write(target, code.encode(), 0o755)
 

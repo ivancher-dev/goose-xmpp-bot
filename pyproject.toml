@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "goose-xmpp-bot"
-version = "0.3.3"
+version = "0.3.4"
 description = "Семейный XMPP-помощник с управляемыми ответами модели"
 requires-python = ">=3.12,<3.13"
 dependencies = ["slixmpp==1.17.0", "slixmpp-omemo==2.2.0", "httpx==0.28.1", "defusedxml==0.7.1"]
@@ -14,6 +14,10 @@ test = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
 
 [project.scripts]
 goose-bot = "goose.cli:main"
+goose-backup = "goose.backup:main"
+
+[tool.setuptools.package-data]
+goose = ["systemd/*.in"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

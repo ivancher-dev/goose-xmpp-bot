@@ -1,0 +1,28 @@
+[Unit]
+Description=Гусь: проверенная резервная копия
+After=local-fs.target
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+WorkingDirectory=@PREFIX@
+ExecStart=/usr/local/sbin/goose-backup --prefix @PREFIX@ create
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONNOUSERSITE=1
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=10min
+RestartPreventExitStatus=2
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=@BACKUPS@
+ReadWritePaths=@PREFIX@/.update.lock
+RestrictAddressFamilies=AF_UNIX

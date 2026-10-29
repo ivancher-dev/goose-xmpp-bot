@@ -1,0 +1,11 @@
+[Unit]
+Description=Гусь: ежедневная резервная копия
+
+[Timer]
+OnCalendar=@CALENDAR@
+Persistent=true
+AccuracySec=1min
+Unit=goose-xmpp-bot-backup.service
+
+[Install]
+WantedBy=timers.target
