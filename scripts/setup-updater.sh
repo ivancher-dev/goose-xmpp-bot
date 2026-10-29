@@ -8,6 +8,7 @@ config=/etc/goose-xmpp-bot/config.toml
 data_dir=/var/lib/goose-xmpp-bot
 env_file=/etc/goose-xmpp-bot/goose.env
 local_install=false
+refresh=false
 while (($#)); do
     case "$1" in
         --prefix|--config|--data-dir|--env-file)
@@ -18,7 +19,8 @@ while (($#)); do
             esac
             shift 2;;
         --local) local_install=true; shift;;
-        *) echo 'Допустимы --prefix, --config, --data-dir, --env-file, --local.' >&2; exit 2;;
+        --refresh) refresh=true; shift;;
+        *) echo 'Допустимы --prefix, --config, --data-dir, --env-file, --local, --refresh.' >&2; exit 2;;
     esac
 done
 if ! $local_install && ((EUID != 0)); then
@@ -28,14 +30,14 @@ if [[ -n "$(git -C "$source_dir" status --porcelain --untracked-files=normal)" ]
     echo 'Нужен чистый checkout выбранной версии.' >&2; exit 2
 fi
 python_bin=${GOOSE_PYTHON:-python3.12}
-"$python_bin" - "$source_dir" "$prefix" "$config" "$data_dir" "$env_file" "$local_install" <<'PY'
+"$python_bin" - "$source_dir" "$prefix" "$config" "$data_dir" "$env_file" "$local_install" "$refresh" <<'PY'
 from pathlib import Path
 import sys
 assert sys.version_info[:2] == (3, 12), 'Требуется Python 3.12'
 sys.path.insert(0, str(Path(sys.argv[1]) / 'src'))
 from goose.maintenance import bootstrap, UpdateError
 try:
-    bootstrap(*map(Path, sys.argv[1:6]), sys.argv[6] == 'true')
+    bootstrap(*map(Path, sys.argv[1:6]), sys.argv[6] == 'true', refresh=sys.argv[7] == 'true')
 except (UpdateError, OSError, ValueError, KeyError):
     raise SystemExit('Не удалось зарегистрировать обновлятор. Проверьте пути, права и наличие прежней установки; секреты не выводятся.')
 PY

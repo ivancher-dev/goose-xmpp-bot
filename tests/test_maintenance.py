@@ -1,6 +1,7 @@
 """Сбой на каждом опасном переходе: настоящий диск, SQLite и журнал операции."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -354,11 +355,25 @@ def test_adoption_installs_standalone_launcher_without_touching_legacy_code(inst
     with pytest.raises(m.UpdateError, match='уже настроен'):
         m.bootstrap(root, x.paths['prefix'], x.paths['config'], x.paths['data'], x.paths['env'], True)
     assert (x.paths['prefix'] / 'maintenance.json').read_bytes() == metadata
+    launcher.write_text('old launcher')
+    m.bootstrap(root, x.paths['prefix'], x.paths['config'], x.paths['data'], x.paths['env'], True, refresh=True)
+    compile(launcher.read_text(), str(launcher), 'exec')
+    assert (x.paths['prefix'] / 'maintenance.json').read_bytes() == metadata
+    assert contents(x.paths) == before and not x.system.events
+    with pytest.raises(m.UpdateError, match='Пути не совпадают'):
+        m.bootstrap(root, x.paths['prefix'], x.paths['config'], x.paths['data'], x.paths['config'], True, refresh=True)
+    with m.locked(x.paths['prefix'] / '.update.lock'):
+        with pytest.raises(m.UpdateError, match='занято'):
+            m.bootstrap(root, x.paths['prefix'], x.paths['config'], x.paths['data'], x.paths['env'], True, refresh=True)
 
 
 def test_private_build_scripts_become_executable_for_service_user(tmp_path):
     release = tmp_path / 'release'
-    (release / 'bin').mkdir(parents=True, mode=0o700)
+    previous = os.umask(0o077)
+    try:
+        (release / 'bin').mkdir(parents=True, mode=0o755)
+    finally:
+        os.umask(previous)
     script, module = release / 'bin/goose-bot', release / 'module.py'
     script.write_text('#!/usr/bin/env python3.12\n')
     script.chmod(0o700)
@@ -368,6 +383,24 @@ def test_private_build_scripts_become_executable_for_service_user(tmp_path):
     assert script.stat().st_mode & 0o777 == 0o755
     assert module.stat().st_mode & 0o777 == 0o644
     assert (release / 'bin').stat().st_mode & 0o777 == 0o755
+    assert release.stat().st_mode & 0o777 == 0o755
+
+
+def test_private_umask_does_not_block_service_at_releases_parent(installation):
+    x = installation
+    def runner(args, **kwargs):
+        if 'archive' in args:
+            raise m.UpdateError('Остановка перед созданием архива')
+        return COMMIT if '--verify' in args else ''
+    x.updater.run = runner
+    previous = os.umask(0o077)
+    try:
+        with pytest.raises(m.UpdateError, match='перед созданием архива'):
+            m.Updater.stage(x.updater, 'main')
+    finally:
+        os.umask(previous)
+    assert (x.paths['prefix'] / 'releases').stat().st_mode & 0o777 == 0o755
+    assert not x.system.events
 
 
 def test_notify_uses_unix_socket_and_never_includes_configuration(tmp_path, monkeypatch):

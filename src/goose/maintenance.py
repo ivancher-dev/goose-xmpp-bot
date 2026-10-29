@@ -206,6 +206,8 @@ def inspect(venv, runner=run):
 
 def readable_release(release):
     """Как chmod a+rX: сохраняем исполняемость скриптов для пользователя службы."""
+    # Сам корень не входит в rglob; mkdir(0755) под umask 077 создаёт 0700.
+    release.chmod(release.stat().st_mode | 0o555)
     for path in release.rglob('*'):
         if not path.is_symlink():
             mode = path.stat().st_mode
@@ -283,9 +285,17 @@ def install_launcher(source, paths, local):
     atomic_write(target, code.encode(), 0o755)
 
 
-def bootstrap(repo, prefix, config, data, env, local):
+def bootstrap(repo, prefix, config, data, env, local, *, refresh=False):
     """Однократная регистрация существующей установки установщиком."""
     metadata = prefix / 'maintenance.json'
+    if refresh:
+        with locked(prefix / '.update.lock'):
+            existing, paths = settings(prefix)
+            wanted = dict(repo=repo, config=config, data=data, env=env)
+            if existing['local'] is not local or any(paths[k] != p for k, p in wanted.items()):
+                raise UpdateError('Пути не совпадают с действующей регистрацией; команда не заменена.')
+            install_launcher(repo, paths, local)
+        return
     if metadata.exists() or metadata.is_symlink():
         raise UpdateError('Обновлятор уже настроен; используйте goose-update.')
     if not (prefix / 'venv/bin/python').is_file():
@@ -340,6 +350,8 @@ class Updater:
         releases.mkdir(mode=0o755, exist_ok=True)
         if releases.is_symlink():
             raise UpdateError("Каталог версий не должен быть ссылкой.")
+        # Это родитель всех release; он тоже должен пропускать пользователя службы.
+        releases.chmod(0o755)
         release = releases / (commit[:12] + "-" + uuid.uuid4().hex[:8])
         release.mkdir(mode=0o755)
         write_json(release / ".goose-release.json", {"commit": commit, "managed": 1})
