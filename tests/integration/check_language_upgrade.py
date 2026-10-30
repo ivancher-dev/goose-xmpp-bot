@@ -1,4 +1,4 @@
-"""Настоящий переход 0.3.4/схема 4 → 0.3.5/схема 5 на временных данных.
+"""Настоящий переход 0.3.4/схема 4 → текущий код/схема 5 на временных данных.
 
 Запуск из чистого коммита. /tmp, локальный Git origin, pip по lock с хешами.
 Не требует root, XMPP, модели или systemd. Не входит в обычный pytest.
@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import tempfile
+import tomllib
 
 
 def main():
@@ -23,6 +24,7 @@ def main():
         assert result.returncode == 0, f'Ошибка команды: {lab}/last-command.log'
         return result.stdout.strip()
     target = run(['git', '-C', source, 'rev-parse', 'HEAD'])
+    target_version = tomllib.loads(run(['git', '-C', source, 'show', target + ':pyproject.toml']))['project']['version']
     run(['git', 'clone', '--no-hardlinks', source, repo])
     run(['git', '-C', repo, 'switch', '--detach', '8d8fb38'])
     config = cfg / 'config.toml'
@@ -63,9 +65,9 @@ asyncio.run(main())
             return {name: list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in names}
     before = old_tables()
     run(['git', '-C', repo, 'switch', '--detach', target])
-    print('Обновление 0.3.4 → 0.3.5 с пробной миграцией', flush=True)
+    print(f'Обновление 0.3.4 → {target_version} с пробной миграцией', flush=True)
     run([app / 'bin/goose-update', '--ref', target])
-    assert run([app / 'venv/bin/goose-bot', '--version']) == '0.3.5'
+    assert run([app / 'venv/bin/goose-bot', '--version']) == target_version
     # В --local System.start выполняет doctor, а не запускает рабочий XMPP.
     # Воспроизводим именно инициализацию БД первого настоящего run.
     initialize = '''

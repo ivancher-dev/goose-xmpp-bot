@@ -261,6 +261,59 @@ async def test_feedback_fits_with_real_persona_and_nearby_context(system):
     assert '→' in sent[-1][1]
 
 
+async def test_feedback_fits_with_full_persona_like_rules_and_long_recent_answers(system, database):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from goose.dialogue import Job
+    from goose.social import LIKE_RULE
+    engine, _, _, _ = system
+    engine.config.llm.persona_file.write_text((Path(__file__).resolve().parents[1] / 'config/persona.example.md').read_text())
+    await engine.update_language(CHILD, 'enabled', True)
+    await engine.set_mode(CHILD, 'auto')
+    engine.social = SimpleNamespace(can_like=lambda *args: True, stop_typing=lambda *args: None)
+    turn = await database.add_user_message(CHILD, 'Первый учебный вопрос')
+    await database.add_assistant_message(CHILD, turn, 'Объяснение учебной темы. ' * 20)
+    turn = await database.add_user_message(CHILD, 'Объясни новый пример.')
+    await database.add_assistant_message(CHILD, turn, 'Простой ответ на следующий вопрос. ' * 10)
+    turn = await database.add_user_message(CHILD, 'Почему листья жёлтые?')
+    row = await database.dialogue(CHILD)
+    context, body, preference = await engine._context(CHILD, Job(turn, row['revision'], engine.clock()+60))
+    assert preference and preference['enabled']
+    assert lang.MARKER in str(context) and LIKE_RULE in context[0]['content']
+    assert any('Объяснение учебной темы.' in m['content'] for m in context)
+    assert any('Простой ответ на следующий вопрос.' in m['content'] for m in context)
+    assert body == 'Почему листья жёлтые?' and estimate_tokens(context) <= 9000
+
+
+@pytest.mark.parametrize('case,reason', [
+    ('missing', 'missing_metadata'), ('broken', 'invalid_metadata'),
+    ('empty', 'no_notes'), ('uncertain', 'uncertain_language'),
+    ('filtered', 'filtered_notes'), ('budget', 'output_budget'), ('added', None)])
+def test_feedback_diagnostics_explain_outcome_without_private_values(caplog, case, reason):
+    private = 'fixture-private-rule-and-example'
+    note = {**NOTE, 'rule': private, 'example': private}
+    body = 'зилёная ' + private
+    result = packet(notes=[note])
+    if case == 'missing':
+        result = 'Ответ. ' + private
+    elif case == 'broken':
+        result = 'Ответ.\n' + lang.MARKER + '{' + private
+    elif case == 'empty':
+        result = packet(notes=[])
+    elif case == 'uncertain':
+        result = packet(language='und')
+    elif case == 'filtered':
+        result = packet(notes=[{**note, 'source': 'несуществующий фрагмент'}])
+    elif case == 'budget':
+        result = packet('а'*4090, [note])
+    with caplog.at_level('INFO', logger='goose'):
+        lang.render_feedback(result, body, PREF)
+    expected = 'language_feedback_added notes=1' if reason is None else 'language_feedback_skipped reason=' + reason
+    assert expected in caplog.text
+    for value in (private, NOTE['source'], NOTE['correction'], CHILD, lang.MARKER):
+        assert value not in caplog.text
+
+
 @pytest.mark.parametrize('action', ['manual', 'clear', 'profile', 'language', 'hold'])
 async def test_late_feedback_after_cancel_is_not_delivered_and_other_dialogue_continues(system, action):
     engine, model, sent, _ = system

@@ -242,6 +242,7 @@ class Dialogues:
             while len(recent) > 4 and estimate_tokens(enriched + framed_history(recent)) > self.config.memory.context_token_budget:
                 recent.pop(0)
             if estimate_tokens(enriched + framed_history(recent)) <= self.config.memory.context_token_budget:
+                log.info('language_feedback_requested')
                 return enriched + framed_history(recent), body, preferences
             log.info('language_feedback_skipped reason=context_budget')
         return prefix + framed_history(history), body, None

@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import logging
 import re
 
 from .config import ConfigError
 
+log = logging.getLogger('goose')
 MARKER = '[[GOOSE_LANGUAGE]]'
 PREFIX = '[[GOOSE_LANGUAGE'
 DEFAULTS = {'enabled': False, 'mode': 'brief', 'max_notes': 2}
@@ -38,27 +40,26 @@ def opted_out(body):
 
 def instructions(preferences):
     return (
-        '\n\nЯзыковые комментарии включены только для последнего сообщения пользователя. '
-        'Сначала дай ПОЛНЫЙ обычный ответ на его вопрос простым текстом; он важнее разбора. '
-        'Только если осталось место и есть уверенные полезные исправления, после ответа '
-        'на отдельной строке напиши ' + MARKER + ', затем JSON без Markdown: '
+        'Проверь ошибки ТОЛЬКО в последнем сообщении пользователя, на языке этого текста. '
+        'Дай полный ответ на вопрос, затем новую строку ' + MARKER + ' и JSON без Markdown: '
         '{"language":"ru","notes":[{"source":"зилёная","correction":"зелёная",'
-        '"rule":"Проверим словом зе́лень: е под ударением.","example":"Зелёная трава."}]}. '
-        'language — язык проверяемого текста (ISO-код, mixed для смешанного); '
-        'если язык или правило неясны, пропусти весь блок. Анализируй язык сообщения, '
-        'не переводи его для проверки. Поясняй на языке сообщения или по явной просьбе. '
-        'source — точный короткий фрагмент последнего сообщения, correction — исправление; '
-        'rule и example обязательны, проверочное слово/правило не выдумывай. '
-        'Учитывай текущий класс. Не меняй числа, имена, отрицания и смысл. '
-        'Цитаты, условие задачи, код, URL, формулы, чужой текст и чатовые сокращения '
-        'не выдавай за личные ошибки. Стилистический вкус не ошибка. '
-        'Проверять явно указанный чужой фрагмент можно в основном ответе без приписывания ошибок ребёнку. '
-        'Не оценивай грамотность, не считай все ошибки, не жалуйся Папану. '
-        'Просьба без исправлений отменяет блок. Если замечаний нет, не добавляй даже метку. '
-        f'Режим {preferences["mode"]}; максимум {preferences["max_notes"]} замечаний. '
-        + ('Каждое правило до 240 символов, пример до 180.' if preferences['mode'] == 'brief'
-           else 'Поясняй подробнее: правило до 600 символов, пример до 300.')
+        '"rule":"Проверим: зе́лень.","example":"Зелёная трава."}]}. '
+        'Уверенную ошибку исправь. Нет уверенности или места — notes:[], но основной ответ сохрани. '
+        'language: ISO-код, mixed или und. source — дословный фрагмент; correction — исправление; '
+        'rule — верное правило, example — пример. Не выдумывай проверочных слов. '
+        'Поясняй по классу, на языке сообщения или по явной просьбе. '
+        'Цитаты, чужое условие, код, формулы и URL не личные ошибки; не трогай стиль/сокращения, '
+        'имена, числа и смысл. Без оценок и жалоб Папану. «Без исправлений» — notes:[]. '
+        f'Не более {preferences["max_notes"]} заметок. '
+        + ('Кратко: rule до 240 символов, example до 180.' if preferences['mode'] == 'brief'
+           else 'Подробно: rule до 600 символов, example до 300.')
     )
+
+
+def _skipped(reason, answer):
+    # Только закрытый код причины; никаких фрагментов, JID или ответов API.
+    log.info('language_feedback_skipped reason=%s', reason)
+    return answer
 
 
 def _text(value, maximum):
@@ -92,40 +93,59 @@ def render_feedback(text, body, preferences=None):
     """Сломанный/обрезанный необязательный блок отбрасывается, ответ не сокращается."""
     index = text.find(PREFIX)
     if index < 0:
+        if preferences and preferences['enabled']:
+            return _skipped('missing_metadata', text.strip())
         return text.strip()
     answer, tail = text[:index].rstrip(), text[index:]
-    if (not answer or not preferences or not preferences['enabled'] or opted_out(body)
-            or not tail.startswith(MARKER) or len(tail) > 12000):
+    if not preferences or not preferences['enabled']:
         return answer
+    if not answer:
+        return _skipped('no_answer', answer)
+    if opted_out(body):
+        return _skipped('opt_out', answer)
+    if not tail.startswith(MARKER) or len(tail) > 12000:
+        return _skipped('invalid_metadata', answer)
     try:
         value = json.loads(tail[len(MARKER):], object_pairs_hook=_unique_object)
         if (not isinstance(value, dict) or set(value) != {'language', 'notes'}
                 or not isinstance(value['language'], str)
                 or not re.fullmatch(r'(?:[a-z]{2,3}|mixed)', value['language'])
-                or value['language'] in {'und', 'mul', 'zxx'}
                 or not isinstance(value['notes'], list) or len(value['notes']) > 16):
-            return answer
+            return _skipped('invalid_metadata', answer)
+        if value['language'] in {'und', 'mul', 'zxx'}:
+            return _skipped('uncertain_language', answer)
+        if not value['notes']:
+            return _skipped('no_notes', answer)
         editable = PROTECTED.sub(lambda match: ' ' * len(match[0]), body)
         notes, used = [], set()
+        rejected = {'format': 0, 'change': 0, 'source': 0, 'duplicate': 0}
         brief = preferences['mode'] == 'brief'
         for note in value['notes']:
             if (not isinstance(note, dict) or set(note) != {'source', 'correction', 'rule', 'example'}
                     or not all(_text(note.get(k), size) for k, size in
                                [('source', 160), ('correction', 160),
                                 ('rule', 240 if brief else 600), ('example', 180 if brief else 300)])):
+                rejected['format'] += 1
                 continue
             source, correction = note['source'], note['correction']
-            if (len(source.strip()) < 2 or source == correction or not _safe_change(source, correction)
-                    or source not in editable or source in used):
+            if len(source.strip()) < 2 or source == correction or not _safe_change(source, correction):
+                rejected['change'] += 1
                 continue
-            if not re.search(r'(?<!\w)' + re.escape(source) + r'(?!\w)', editable):
+            if source not in editable or not re.search(r'(?<!\w)' + re.escape(source) + r'(?!\w)', editable):
+                rejected['source'] += 1
+                continue
+            if source in used:
+                rejected['duplicate'] += 1
                 continue
             used.add(source)
             notes.append(note)
             if len(notes) == preferences['max_notes']:
                 break
+        if any(rejected.values()):
+            log.info('language_feedback_filtered format=%d change=%d source=%d duplicate=%d',
+                     rejected['format'], rejected['change'], rejected['source'], rejected['duplicate'])
         if not notes:
-            return answer
+            return _skipped('filtered_notes', answer)
         rules = ' '.join(note['rule'] for note in notes)
         if re.search('[А-Яа-яЁё]', rules):
             intros = ('Га-Га-Га! На минутку включаю гусиного редактора:',
@@ -137,12 +157,17 @@ def render_feedback(text, body, preferences=None):
             intros = ('✎',)
         intro = intros[hashlib.sha256(body.encode()).digest()[0] % len(intros)]
         block = intro
+        count = 0
         for i, note in enumerate(notes, 1):
             part = (f'\n{i}. «{note["source"]}» → «{note["correction"]}».\n'
                     f'{note["rule"]}\n{note["example"]}')
             if len(block + part) > (1100 if brief else 1800) or len(answer + '\n\n' + block + part) > 4096:
                 break
             block += part
-        return answer + '\n\n' + block if block != intro else answer
+            count += 1
+        if not count:
+            return _skipped('output_budget', answer)
+        log.info('language_feedback_added notes=%d', count)
+        return answer + '\n\n' + block
     except (ValueError, TypeError, KeyError, RecursionError):
-        return answer
+        return _skipped('invalid_metadata', answer)
