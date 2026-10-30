@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "goose-xmpp-bot"
-version = "0.3.9"
+version = "0.3.10"
 description = "Семейный XMPP-помощник с управляемыми ответами модели"
 requires-python = ">=3.12,<3.13"
 dependencies = ["slixmpp==1.17.0", "slixmpp-omemo==2.2.0", "httpx==0.28.1", "defusedxml==0.7.1"]

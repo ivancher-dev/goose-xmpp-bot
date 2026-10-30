@@ -202,6 +202,51 @@ def test_broken_optional_metadata_does_not_lose_main_answer(tail):
                                 'Почему трава зилёная?', PREF) == 'Полный основной ответ.'
 
 
+@pytest.mark.parametrize('opening,newline', [('```', '\n'), ('```json', '\n'),
+    ('```JSON', '\n'), ('```json  ', '\r\n')])
+def test_complete_json_fence_is_only_a_wrapper_and_never_visible(opening, newline):
+    payload = json.dumps({'language': 'ru', 'notes': [NOTE]}, ensure_ascii=False)
+    wrapped = 'Полный основной ответ.\n' + lang.MARKER + '\n' + opening + newline + payload + newline + '```\n'
+    result = lang.render_feedback(wrapped, 'Почему трава зилёная?', PREF)
+    assert result.startswith('Полный основной ответ.') and '«зилёная» → «зелёная»' in result
+    assert '```' not in result and lang.MARKER not in result
+
+
+@pytest.mark.parametrize('wrapper', ['```python\n{}\n```', '```json\n{}',
+    'Перед JSON: {}', '```\n{}\n```\nпояснение', '```\n{}\n```\n```\n{}\n```'])
+def test_json_wrappers_do_not_allow_code_prose_or_multiple_objects(wrapper):
+    payload = json.dumps({'language': 'ru', 'notes': [NOTE]}, ensure_ascii=False)
+    tail = wrapper.replace('{}', payload)
+    assert lang.render_feedback('Ответ.\n'+lang.MARKER+tail, 'зилёная', PREF) == 'Ответ.'
+
+
+@pytest.mark.parametrize('tail,detail', [
+    ('{', 'json_syntax'), ('[]', 'root_type'), ('{}', 'root_fields'),
+    ('{"language":"ru","language":"en","notes":[]}', 'duplicate_key'),
+    ('{"language":"Russian","notes":[]}', 'language_format'),
+    ('{"language":"ru","notes":null}', 'notes_type'),
+    ('{"language":"ru","notes":['+','.join(['{}']*17)+']}', 'notes_limit'),
+    ('```json\n{}', 'fence')])
+def test_invalid_metadata_has_closed_safe_detail(caplog, tail, detail):
+    with caplog.at_level('INFO', logger='goose'):
+        result = lang.render_feedback('Основной ответ.\n'+lang.MARKER+tail, 'synthetic-private-input', PREF)
+    assert result == 'Основной ответ.'
+    assert 'language_feedback_invalid detail='+detail in caplog.text
+    assert 'language_feedback_skipped reason=invalid_metadata' in caplog.text
+    for private in ('synthetic-private-input', 'Russian', 'Основной ответ.', lang.MARKER):
+        assert private not in caplog.text
+
+
+def test_decoder_recursion_error_keeps_main_answer_without_exception_text(monkeypatch, caplog):
+    def depth_error(*args, **kwargs):
+        raise RecursionError('synthetic-private-exception')
+    monkeypatch.setattr(lang.json, 'loads', depth_error)
+    with caplog.at_level('INFO', logger='goose'):
+        result = lang.render_feedback('Ответ.\n'+lang.MARKER+'{}', 'synthetic-private-input', PREF)
+    assert result == 'Ответ.' and 'language_feedback_invalid detail=json_depth' in caplog.text
+    assert 'synthetic-private' not in caplog.text
+
+
 def test_truncated_protocol_or_output_keeps_main_answer():
     for marker in [lang.PREFIX, lang.PREFIX + ']', lang.MARKER]:
         assert lang.render_feedback('Ответ.\n' + marker, 'зилёная', PREF) == 'Ответ.'

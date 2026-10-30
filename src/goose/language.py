@@ -43,16 +43,16 @@ def instructions(preferences, body=''):
     words = {str(i): match[0] for i, match in enumerate(re.finditer(r'\S+', body), 1)}
     return (
         'Проверь ошибки только последнего сообщения. '
-        'Полный ответ, затем ' + MARKER + ' и JSON без Markdown: '
-        '{"language":"ru","notes":[{"source":"...","start":1,"end":1,"correction":"...",'
+        'Полный ответ, затем ' + MARKER + ' и JSON: '
+        '{"language":"ru","notes":[{"source":"...","correction":"...",'
         '"rule":"...","example":"..."}]}. '
         'Без уверенности/места — notes:[], ответ сохрани. '
-        'language: ISO/mixed/und; start/end — номера слов включительно; '
-        'source — дословно из этого диапазона; correction — исправление. '
+        'language: ISO/mixed/und; source — дословный фрагмент сообщения; correction — исправление. '
         'rule — причина, не повтор исправления: '
         'правило/условие, проверка с ударением или '
-        'лишняя/пропущенная буква опечатки; словарное — запомнить. '
-        'example — применение. Правил/проверок не выдумывай. '
+        'причина опечатки. example — применение. '
+        'Образец: «жыраф»→«жираф», rule «Жи–ши пиши с и», example «Высокий жираф». '
+        '«Запомнить» — только для словарного. Правил/проверок не выдумывай. '
         'По классу; язык сообщения/явная просьба. '
         'Цитаты/условие/код/формулы/URL/стиль/сокращения не личные ошибки. '
         'Имена/числа/смысл сохрани. Без оценок/жалоб Папану. «Без исправлений» — notes:[]. '
@@ -106,13 +106,60 @@ def _nearby_spelling(source, correction):
     return row[-1] <= limit
 
 
+class _MetadataError(ValueError):
+    pass
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
 def _unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError()
+            raise _DuplicateKey()
         result[key] = value
     return result
+
+
+def _metadata(tail):
+    if not tail.startswith(MARKER):
+        raise _MetadataError('marker')
+    if len(tail) > 12000:
+        raise _MetadataError('size')
+    payload = tail[len(MARKER):].strip()
+    if payload.startswith('```'):
+        wrapper = re.fullmatch(r'```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```', payload, re.I)
+        if wrapper is None:
+            raise _MetadataError('fence')
+        payload = wrapper[1]
+        log.info('language_feedback_wrapper format=fenced_json')
+    try:
+        value = json.loads(payload, object_pairs_hook=_unique_object)
+    except _DuplicateKey:
+        raise _MetadataError('duplicate_key') from None
+    except RecursionError:
+        raise _MetadataError('json_depth') from None
+    except ValueError:
+        raise _MetadataError('json_syntax') from None
+    if not isinstance(value, dict):
+        raise _MetadataError('root_type')
+    if set(value) != {'language', 'notes'}:
+        raise _MetadataError('root_fields')
+    if not isinstance(value['language'], str) or not re.fullmatch(r'(?:[a-z]{2,3}|mixed)', value['language']):
+        raise _MetadataError('language_format')
+    if not isinstance(value['notes'], list):
+        raise _MetadataError('notes_type')
+    if len(value['notes']) > 16:
+        raise _MetadataError('notes_limit')
+    return value
+
+
+def _invalid(detail, answer):
+    # detail создаётся только кодом выше; текст исключения JSON не журналируется.
+    log.info('language_feedback_invalid detail=%s', detail)
+    return _skipped('invalid_metadata', answer)
 
 
 def _unprotected(start, end, protected):
@@ -183,15 +230,8 @@ def render_feedback(text, body, preferences=None):
         return _skipped('no_answer', answer)
     if opted_out(body):
         return _skipped('opt_out', answer)
-    if not tail.startswith(MARKER) or len(tail) > 12000:
-        return _skipped('invalid_metadata', answer)
     try:
-        value = json.loads(tail[len(MARKER):], object_pairs_hook=_unique_object)
-        if (not isinstance(value, dict) or set(value) != {'language', 'notes'}
-                or not isinstance(value['language'], str)
-                or not re.fullmatch(r'(?:[a-z]{2,3}|mixed)', value['language'])
-                or not isinstance(value['notes'], list) or len(value['notes']) > 16):
-            return _skipped('invalid_metadata', answer)
+        value = _metadata(tail)
         if value['language'] in {'und', 'mul', 'zxx'}:
             return _skipped('uncertain_language', answer)
         if not value['notes']:
@@ -252,5 +292,7 @@ def render_feedback(text, body, preferences=None):
             return _skipped('output_budget', answer)
         log.info('language_feedback_added notes=%d', count)
         return answer + '\n\n' + block
+    except _MetadataError as error:
+        return _invalid(str(error), answer)
     except (ValueError, TypeError, KeyError, RecursionError):
-        return _skipped('invalid_metadata', answer)
+        return _invalid('structure', answer)
