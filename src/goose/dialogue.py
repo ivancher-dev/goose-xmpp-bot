@@ -236,7 +236,7 @@ class Dialogues:
         preferences = await self.database.language_preferences(jid)
         if preferences['enabled'] and not opted_out(body):
             # Общие правила ответа и его формата передаём одним system-блоком.
-            enriched = [{**prefix[0], 'content': prefix[0]['content'] + '\n\n' + instructions(preferences)},
+            enriched = [{**prefix[0], 'content': prefix[0]['content'] + '\n\n' + instructions(preferences, body)},
                         *prefix[1:]]
             recent = list(history)
             # Не теряем ближайшие четыре сообщения ради необязательной функции.

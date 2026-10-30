@@ -140,6 +140,24 @@ async def test_main_answer_then_feedback_one_request_no_rewriting_and_isolation(
     assert history[1]['content'] == child
 
 
+async def test_current_word_table_and_index_reply_ignore_similar_old_questions(system, database):
+    engine, model, sent, _ = system
+    await database.add_user_message(CHILD, 'Другая старая ошибка в вопросе')
+    await engine.update_language(CHILD, 'enabled', True)
+    await engine.set_mode(CHILD, 'auto')
+    note = {'start': 3, 'end': 3, 'correction': 'белый',
+            'rule': 'Проверим: бе́ленький.', 'example': 'Белый снег.'}
+    model.result = packet(notes=[note])
+    await engine.submit(CHILD, 'Как растёт билый гриб?')
+    await idle(engine)
+    assert len(model.calls) == 1
+    table = json.loads(model.calls[0][0]['content'].rsplit('\n', 1)[-1])
+    assert table == {'1': 'Как', '2': 'растёт', '3': 'билый', '4': 'гриб?'}
+    assert '«билый» → «белый»' in sent[0][1]
+    history = await database.history(CHILD, 100, 24, 30)
+    assert history[-2] == {'role': 'user', 'content': 'Как растёт билый гриб?'}
+
+
 @pytest.mark.parametrize('body', ['Почему трава зилёная? Сейчас без исправлений.',
     'Не исправляй ошибки, почему трава зилёная?', 'No corrections: why is it green?',
     "Don't correct my writing. Why is it green?"])
@@ -203,6 +221,64 @@ def test_detailed_mode_and_global_limit_never_shorten_main_answer():
     'Условие задачи: зилёная', 'Цитата: зилёная', 'Код: зилёная'])
 def test_foreign_fragments_urls_code_math_and_hallucinated_sources_are_not_child_errors(body):
     assert lang.render_feedback(packet(), body, PREF) == 'Ответ на вопрос.'
+
+
+@pytest.mark.parametrize('reported', ['ежык', '«ежык»', '"ежык"', 'ЕЖЫК'])
+def test_source_representation_variants_use_the_actual_word_from_message(reported):
+    note = {'source': reported, 'correction': 'ёжик',
+            'rule': 'После ж пишем и: жи-ши.', 'example': 'Маленький ёжик.'}
+    output = lang.render_feedback(packet(notes=[note]), 'Где ёжык?', PREF)
+    assert '«ёжык» → «ёжик»' in output
+    assert lang.MARKER not in output
+
+
+@pytest.mark.parametrize('reported', ['I is', 'I     is'])
+def test_source_representation_whitespace_is_preserved_in_visible_original(reported):
+    note = {'source': reported, 'correction': 'I am',
+            'rule': 'Use am with I.', 'example': 'I am here.'}
+    output = lang.render_feedback(packet(notes=[note], language='en'), 'Why I  is here?', PREF)
+    assert '«I  is» → «I am»' in output
+
+
+@pytest.mark.parametrize('body,reported,correction', [
+    ('«ёжык»', 'ежык', 'ёжик'), ('`ёжык`', 'ежык', 'ёжик'),
+    ('https://example.org/ёжык', 'ежык', 'ёжик'),
+    ('Ежык Ёжык', 'ЕЖЫК', 'ёжик'),
+    ('там собака', 'сабака', 'собака'),
+    ('Ёлкина пришла', 'елкина', 'Петрова'),
+    ('не «слово из цитаты» был', 'не был', 'не была')])
+def test_source_representation_matching_cannot_guess_spelling_or_change_protected_text(body, reported, correction):
+    note = {**NOTE, 'source': reported, 'correction': correction}
+    assert lang.render_feedback(packet(notes=[note]), body, PREF) == 'Ответ на вопрос.'
+
+
+@pytest.mark.parametrize('extra', [{}, {'source': 'другое написание из ответа модели'}])
+def test_word_indices_ground_original_even_when_model_cannot_copy_typo(extra):
+    note = {'start': 3, 'end': 3, 'correction': 'белый',
+            'rule': 'Проверочное слово: бе́ленький.', 'example': 'Белый снег.', **extra}
+    output = lang.render_feedback(packet(notes=[note]), 'Как растёт билый гриб?', PREF)
+    assert '«билый» → «белый»' in output
+    assert 'другое написание' not in output
+
+
+def test_word_index_ranges_keep_actual_spacing_and_accept_numeric_json_strings():
+    note = {'start': '2', 'end': '3', 'correction': 'I am',
+            'rule': 'Use am with I.', 'example': 'I am here.'}
+    assert '«I   is» → «I am»' in lang.render_feedback(packet(notes=[note], language='en'), 'Why I   is here?', PREF)
+
+
+@pytest.mark.parametrize('start,end', [(0, 1), (1, 99), (2, 1), (-1, 2),
+    (True, 1), (1, False), (1.0, 2), ('1;DROP', 2), (1, None)])
+def test_invalid_word_indices_cannot_fall_back_to_an_unchecked_source(start, end):
+    note = {**NOTE, 'start': start, 'end': end}
+    assert lang.render_feedback(packet(notes=[note]), 'Почему трава зилёная?', PREF) == 'Ответ на вопрос.'
+
+
+@pytest.mark.parametrize('body,start,end', [('Пример «билый»', 2, 2), ('Код `билый`', 2, 2),
+    ('Пример https://example.org/билый', 2, 2), ('не «чужой текст» был', 1, 5)])
+def test_word_indices_cannot_review_quotes_code_urls_or_cross_protected_fragments(body, start, end):
+    note = {'start': start, 'end': end, 'correction': 'белый', 'rule': 'Правило.', 'example': 'Пример.'}
+    assert lang.render_feedback(packet(notes=[note]), body, PREF) == 'Ответ на вопрос.'
 
 
 @pytest.mark.parametrize('source,correction', [('2 яблака', '3 яблока'), ('не пришол', 'пришёл'),

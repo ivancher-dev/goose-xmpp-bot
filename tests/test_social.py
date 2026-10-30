@@ -103,10 +103,10 @@ async def test_language_feedback_like_and_typing_share_one_encrypted_reply(socia
     from goose.language import MARKER
     client, model, plugin, sent, _ = social
     await client.dialogues.update_language(CHILD, 'enabled', True)
-    payload = {'language': 'ru', 'notes': [{'source': 'зилёная', 'correction': 'зелёная',
+    payload = {'language': 'ru', 'notes': [{'start': 3, 'end': 3, 'correction': 'зелёная',
         'rule': 'Проверим: зе́лень.', 'example': 'Зелёная трава.'}]}
     model.complete.return_value = LIKE + '\nОтвет о хлорофилле.\n' + MARKER + json.dumps(payload, ensure_ascii=False)
-    await client.process_message(event(CHILD + '/phone', OWN, 'Почему трава зилёная?', ident='language-id'))
+    await client.process_message(event(CHILD + '/phone', OWN, 'Почему трава зилёная', ident='language-id'))
     await idle(client)
     assert model.complete.await_count == 1
     body = plugin.encrypt_message.await_args.args[0]['body']
