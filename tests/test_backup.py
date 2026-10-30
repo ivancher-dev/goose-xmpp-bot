@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 
@@ -21,7 +22,8 @@ from goose.storage import OmemoStorage, data_lock
 async def installation(config_file, config, database, tmp_path):
     prefix = tmp_path / 'app'
     prefix.mkdir(mode=0o700)
-    (prefix / 'venv').symlink_to(Path(__file__).resolve().parents[1] / '.venv')
+    # В CI Python установлен вне checkout; используем окружение текущего pytest.
+    (prefix / 'venv').symlink_to(Path(sys.prefix))
     env, persona = tmp_path / 'goose.env', tmp_path / 'persona.md'
     env.write_text('GOOSE_XMPP_PASSWORD="not-executed-$(touch /tmp/never-created)"\n')
     env.chmod(0o600)
