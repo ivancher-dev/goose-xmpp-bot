@@ -11,6 +11,7 @@ from .config import ConfigError, bare_jid
 from .model import ModelError
 from .language import instructions, opted_out, render_feedback
 from .social import LIKE_RULE, answer_metadata
+from .usage import usage_scope
 
 log = logging.getLogger("goose")
 RULES = ("Ты — семейный помощник Гусь, не родитель. Объясняй учебные факты точно. "
@@ -300,7 +301,8 @@ class Dialogues:
                                 continue
                             if self.social:
                                 token = self.social.start_typing(jid, target=job.typing_target)
-                            text, like = answer_metadata(await self.model.complete(context))
+                            with usage_scope(self.database, jid):
+                                text, like = answer_metadata(await self.model.complete(context))
                             text = render_feedback(text, body, preferences)
                             if not text:
                                 raise ModelError('invalid_response')
