@@ -4,12 +4,14 @@ import asyncio
 from collections import deque
 import json
 import time
+import uuid
 from typing import Protocol
 
 import httpx
 
 from .config import LlmConfig
 from .language import PREFIX
+from .usage import Attempt, RecordingError, token_usage
 
 
 class ModelError(Exception):
@@ -41,11 +43,12 @@ class RequestBudget:
 class OpenAICompatible:
     """POST <base_url>/chat/completions, Bearer auth, без инструментов и редиректов."""
 
-    def __init__(self, config: LlmConfig, *, transport=None, sleep=asyncio.sleep, clock=time.monotonic):
+    def __init__(self, config: LlmConfig, *, transport=None, sleep=asyncio.sleep, clock=time.monotonic, wall_clock=time.time):
         self.config = config
         self._key = config.key()
         self.budget = RequestBudget(config.requests_per_minute, clock)
         self.sleep = sleep
+        self.wall_clock = wall_clock
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(config.timeout_seconds), follow_redirects=False, trust_env=False,
             limits=httpx.Limits(max_connections=config.max_concurrent_requests,
@@ -62,9 +65,16 @@ class OpenAICompatible:
             raise ModelError("timeout") from None
 
     async def _complete(self, messages):
+        call_id = uuid.uuid4().hex
         for attempt in range(self.config.max_attempts):
             self.budget.take()
+            record = Attempt(self.config, call_id, attempt + 1, self.wall_clock)
+            try:
+                await record.start()
+            except RecordingError:
+                raise ModelError('unavailable') from None
             retry = False
+            outcome, counts = 'interrupted', (None, None, None)
             try:
                 async with self.client.stream(
                     "POST", self.config.base_url + "/chat/completions",
@@ -76,6 +86,7 @@ class OpenAICompatible:
                         raise ModelError("authentication")
                     if response.status_code in {429, 502, 503, 504}:
                         retry = True
+                        outcome = 'http_error'
                     elif response.status_code != 200:
                         raise ModelError("provider")
                     else:
@@ -86,14 +97,28 @@ class OpenAICompatible:
                             payload.extend(part)
                             if len(payload) > 65536:
                                 raise ModelError("invalid_response")
-                        return self.parse(payload)
+                        counts = token_usage(payload)
+                        result = self.parse(payload)
+                        outcome = 'success'
+                        return result
             except (httpx.ConnectError, httpx.ConnectTimeout):
                 retry = True
+                outcome = 'network'
             except httpx.TimeoutException:
+                outcome = 'timeout'
                 # После отправки запроса провайдер мог уже выполнить платную генерацию.
                 raise ModelError("timeout") from None
             except httpx.HTTPError:
+                outcome = 'network'
                 raise ModelError("network") from None
+            except ModelError as error:
+                outcome = error.code
+                raise
+            except asyncio.CancelledError:
+                outcome = 'cancelled'
+                raise
+            finally:
+                await record.finish(outcome, counts)
             if retry and attempt + 1 < self.config.max_attempts:
                 await self.sleep(0.5 * (attempt + 1))
             else:
