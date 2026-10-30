@@ -158,6 +158,24 @@ async def test_current_word_table_and_index_reply_ignore_similar_old_questions(s
     assert history[-2] == {'role': 'user', 'content': 'Как растёт билый гриб?'}
 
 
+async def test_bad_alignment_is_dropped_without_losing_answer_or_next_valid_note(system):
+    engine, model, sent, _ = system
+    await engine.update_language(CHILD, 'enabled', True)
+    await engine.update_language(CHILD, 'max_notes', 1)
+    await engine.set_mode(CHILD, 'auto')
+    good = {'source': 'хвосд', 'start': 3, 'end': 3, 'correction': 'хвост',
+            'rule': 'Проверим согласную: хвосты.', 'example': 'У лисы хвост.'}
+    model.result = packet('Хвост помогает лисе держать равновесие.',
+                          notes=[{**good, 'start': 1, 'end': 1}, good])
+    await engine.submit(CHILD, 'зачем лисе хвосд')
+    await idle(engine)
+    assert len(model.calls) == len(sent) == 1
+    visible = sent[0][1]
+    assert visible.startswith('Хвост помогает лисе держать равновесие.')
+    assert visible.count('→') == 1 and '«хвосд» → «хвост»' in visible
+    assert '«зачем»' not in visible and lang.MARKER not in visible
+
+
 @pytest.mark.parametrize('body', ['Почему трава зилёная? Сейчас без исправлений.',
     'Не исправляй ошибки, почему трава зилёная?', 'No corrections: why is it green?',
     "Don't correct my writing. Why is it green?"])
@@ -252,19 +270,59 @@ def test_source_representation_matching_cannot_guess_spelling_or_change_protecte
     assert lang.render_feedback(packet(notes=[note]), body, PREF) == 'Ответ на вопрос.'
 
 
-@pytest.mark.parametrize('extra', [{}, {'source': 'другое написание из ответа модели'}])
-def test_word_indices_ground_original_even_when_model_cannot_copy_typo(extra):
+@pytest.mark.parametrize('extra', [{}, {'source': '«БИЛЫЙ»'}])
+def test_word_indices_ground_original_and_allow_source_presentation_variants(extra):
     note = {'start': 3, 'end': 3, 'correction': 'белый',
             'rule': 'Проверочное слово: бе́ленький.', 'example': 'Белый снег.', **extra}
     output = lang.render_feedback(packet(notes=[note]), 'Как растёт билый гриб?', PREF)
     assert '«билый» → «белый»' in output
-    assert 'другое написание' not in output
+
+
+def test_word_indices_do_not_ignore_a_conflicting_reported_source():
+    note = {'start': 3, 'end': 3, 'source': 'другое написание из ответа модели',
+            'correction': 'белый', 'rule': 'Проверочное слово: бе́ленький.', 'example': 'Белый снег.'}
+    assert lang.render_feedback(packet(notes=[note]), 'Как растёт билый гриб?', PREF) == 'Ответ на вопрос.'
 
 
 def test_word_index_ranges_keep_actual_spacing_and_accept_numeric_json_strings():
     note = {'start': '2', 'end': '3', 'correction': 'I am',
             'rule': 'Use am with I.', 'example': 'I am here.'}
     assert '«I   is» → «I am»' in lang.render_feedback(packet(notes=[note], language='en'), 'Why I   is here?', PREF)
+
+
+@pytest.mark.parametrize('extra', [{}, {'source': 'хвосд'}, {'source': 'зачем'}])
+def test_wrong_word_index_cannot_turn_an_unrelated_word_into_a_spelling_correction(extra):
+    note = {'start': 1, 'end': 1, 'correction': 'хвост',
+            'rule': 'Парную согласную проверим: хвосты.', 'example': 'У лисы хвост.', **extra}
+    assert lang.render_feedback(packet(notes=[note]), 'зачем лисе хвосд', PREF) == 'Ответ на вопрос.'
+
+
+def test_index_and_reported_source_must_agree_even_when_both_words_exist():
+    note = {'start': 1, 'end': 1, 'source': 'дом', 'correction': 'лес',
+            'rule': 'Пример правила.', 'example': 'Лес шумит.'}
+    assert lang.render_feedback(packet(notes=[note]), 'лис и дом', PREF) == 'Ответ на вопрос.'
+
+
+@pytest.mark.parametrize('source,correction', [('зачем', 'застёгивается'),
+    ('fox', 'temperature'), ('спутник', 'библиотека'), ('я'*160, 'б'*160)])
+def test_unrelated_replacements_are_filtered_in_legacy_source_format(source, correction):
+    note = {**NOTE, 'source': source, 'correction': correction}
+    assert lang.render_feedback(packet(notes=[note]), source, PREF) == 'Ответ на вопрос.'
+
+
+@pytest.mark.parametrize('source,correction', [('хвосд', 'хвост'), ('I is', 'I am'),
+    ('their is', 'there is'), ('je suis aller', 'je suis allé'), ('светит', 'светит,'),
+    ('падарок', 'подарок'), ('капта', 'карта'), ('по этому', 'поэтому')])
+def test_small_spelling_grammar_and_punctuation_changes_still_pass(source, correction):
+    note = {**NOTE, 'source': source, 'correction': correction}
+    assert '→' in lang.render_feedback(packet(notes=[note]), source, PREF)
+
+
+def test_valid_indexed_source_allows_presentation_variants_and_keeps_original_spacing():
+    note = {'start': 2, 'end': 3, 'source': '«I is»', 'correction': 'I am',
+            'rule': 'Use am with I.', 'example': 'I am here.'}
+    output = lang.render_feedback(packet(notes=[note], language='en'), 'Why I   is here?', PREF)
+    assert '«I   is» → «I am»' in output
 
 
 @pytest.mark.parametrize('start,end', [(0, 1), (1, 99), (2, 1), (-1, 2),

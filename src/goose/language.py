@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 
 from .config import ConfigError
 
@@ -43,13 +44,13 @@ def instructions(preferences, body=''):
     return (
         'Проверь ошибки только последнего сообщения. '
         'Полный ответ, затем ' + MARKER + ' и JSON без Markdown: '
-        '{"language":"ru","notes":[{"start":1,"end":1,"correction":"...",'
+        '{"language":"ru","notes":[{"source":"...","start":1,"end":1,"correction":"...",'
         '"rule":"...","example":"..."}]}. '
         'Без уверенности/места — notes:[], ответ сохрани. '
-        'language: ISO/mixed/und; start/end — номера слов '
-        'включительно (1 — пример); correction — исправление. '
+        'language: ISO/mixed/und; start/end — номера слов включительно; '
+        'source — дословно из этого диапазона; correction — исправление. '
         'rule — причина, не повтор исправления: '
-        'правило/условие, проверка с ударением (глаза — гла́з) или '
+        'правило/условие, проверка с ударением или '
         'лишняя/пропущенная буква опечатки; словарное — запомнить. '
         'example — применение. Правил/проверок не выдумывай. '
         'По классу; язык сообщения/явная просьба. '
@@ -84,7 +85,25 @@ def _safe_change(source, correction):
     if [s.casefold() for s in NEGATIONS.findall(source)] != [s.casefold() for s in NEGATIONS.findall(correction)]:
         return False
     capitals = lambda text: [word for word in WORD.findall(text) if word[0].isupper()]
-    return capitals(source) == capitals(correction)
+    return capitals(source) == capitals(correction) and _nearby_spelling(source, correction)
+
+
+def _nearby_spelling(source, correction):
+    # Только предохранитель от далёкой подмены, не проверка значения/правила.
+    # Длина каждого входа ограничена 160 символами до этого вызова.
+    letters = lambda s: ''.join(WORD.findall(unicodedata.normalize('NFC', s))).casefold()
+    left, right = letters(source), letters(correction)
+    limit = max(2, max(len(left), len(right)) // 2)
+    if abs(len(left) - len(right)) > limit:
+        return False
+    row = list(range(len(right) + 1))
+    for i, a in enumerate(left, 1):
+        previous, row = row, [i]
+        for j, b in enumerate(right, 1):
+            row.append(min(row[-1] + 1, previous[j] + 1, previous[j-1] + (a != b)))
+        if min(row) > limit:
+            return False
+    return row[-1] <= limit
 
 
 def _unique_object(pairs):
@@ -98,6 +117,16 @@ def _unique_object(pairs):
 
 def _unprotected(start, end, protected):
     return not any(start < match.end() and end > match.start() for match in protected)
+
+
+def _reported_source(value):
+    if not _text(value, 160):
+        return None
+    value = value.strip()
+    if len(value) >= 2 and (value[0], value[-1]) in {
+            ('«', '»'), ('“', '”'), ('"', '"'), ("'", "'")}:
+        value = value[1:-1].strip()
+    return value or None
 
 
 def _source(note, body, words, protected):
@@ -115,16 +144,15 @@ def _source(note, body, words, protected):
             return None
         start, end = words[first-1].start(), words[last-1].end()
         source = body[start:end]
+        if 'source' in note:
+            reported = _reported_source(note['source'])
+            representation = lambda s: re.sub(r'\s+', ' ', s).casefold().replace('ё', 'е').strip(' .,!?:;…')
+            if reported is None or representation(reported) != representation(source):
+                return None
         return source if _text(source, 160) and _unprotected(start, end, protected) else None
     # Совместимость с текстовым source: допускаем только разницу представления,
     # никогда не угадываем отсутствующее/иначе написанное слово.
-    reported = note['source']
-    if not _text(reported, 160):
-        return None
-    reported = reported.strip()
-    if len(reported) >= 2 and (reported[0], reported[-1]) in {
-            ('«', '»'), ('“', '”'), ('"', '"'), ("'", "'")}:
-        reported = reported[1:-1].strip()
+    reported = _reported_source(note['source'])
     if not reported:
         return None
     exact = re.compile(r'(?<!\w)' + re.escape(reported) + r'(?!\w)')
