@@ -1,4 +1,4 @@
-"""Миграция 3 → 4 и атомарность сведений о ручной переписке."""
+"""Миграция схемы 3 до текущей и атомарность сведений о ручной переписке."""
 
 import json
 import sqlite3
@@ -54,7 +54,7 @@ async def test_migration_preserves_old_state_and_doctor_is_read_only(config, cap
     assert await db.archive_cursor(CHILD) is None
     before = path.read_bytes()
     doctor(config)
-    assert 'SQLite: схема 4' in capsys.readouterr().out
+    assert 'SQLite: схема 5' in capsys.readouterr().out
     assert path.read_bytes() == before
     await db.initialize(config.users)
     assert (await db.dialogue(CHILD))['revision'] == 7

@@ -8,6 +8,7 @@ HELP = ("Диагностические команды: !help, !ping. Очист
         "Владельцу: !admin status, !admin user show <bare_jid>, "
         "!admin user set <bare_jid> grade=N|academic_year=YYYY-YYYY|schedule_class_id=ID. "
         "Режим диалога: !admin mode <bare_jid> [manual|auto]. "
+        "Языковые комментарии: !admin language <bare_jid> [on|off|mode=brief|mode=detailed|max_notes=N]. "
         "Ручная отправка с другого устройства Гуся включает manual этого диалога. "
         "После подключения auto восстанавливается только при успешной проверке архива; "
         "при неполном архиве подтвердите auto явно. "
@@ -55,6 +56,30 @@ class Commands:
         if words == ["!admin", "status"]:
             return self.status()
         try:
+            if len(words) in (3, 4) and words[1] == 'language':
+                target = bare_jid(words[2], allow_resource=False)
+                if target not in self.config.allowed or await self.database.profile(target) is None:
+                    raise ConfigError('Профиль не найден.')
+                if len(words) == 4:
+                    option = words[3]
+                    if option in {'on', 'off'}:
+                        field, value = 'enabled', option == 'on'
+                    elif '=' in option:
+                        field, value = option.split('=', 1)
+                        if field == 'max_notes':
+                            if not value.isascii() or not value.isdecimal():
+                                raise ConfigError('max_notes: целое число от 1 до 5.')
+                            value = int(value)
+                    else:
+                        raise ConfigError('Использование: !admin language <bare_jid> [on|off|mode=brief|mode=detailed|max_notes=N].')
+                    if self.dialogues:
+                        await self.dialogues.update_language(target, field, value)
+                    else:
+                        await self.database.update_language(target, field, value)
+                preference = await self.database.language_preferences(target)
+                return ('Языковые комментарии: ' + ('включены' if preference['enabled'] else 'выключены') +
+                        '.\nРежим: ' + ('краткий' if preference['mode'] == 'brief' else 'подробный') +
+                        f'.\nМаксимум замечаний: {preference["max_notes"]}.')
             if len(words) in (3, 4) and words[1] == "mode":
                 target = bare_jid(words[2], allow_resource=False)
                 if target not in self.config.allowed:

@@ -9,6 +9,7 @@ import time
 
 from .config import ConfigError, bare_jid
 from .model import ModelError
+from .language import instructions, opted_out, render_feedback
 from .social import LIKE_RULE, answer_metadata
 
 log = logging.getLogger("goose")
@@ -165,6 +166,12 @@ class Dialogues:
             await self.database.update_profile(jid, name, value)
             self._discard(jid)
 
+    async def update_language(self, jid, name, value):
+        jid = self._target(jid)
+        async with self.states[jid].lock:
+            await self.database.update_language(jid, name, value)
+            self._discard(jid)
+
     async def submit(self, jid, body, *, keys=None, stamp=None, message_id=None):
         jid = bare_jid(jid)
         if (jid not in self.states or not self.config.llm.enabled or not self.model
@@ -215,18 +222,29 @@ class Dialogues:
                    f"Стиль объяснения: {profile['explanation_style']}."}]
         history = await self.database.history(jid, job.turn, self.config.memory.recent_messages,
                                               self.config.memory.retention_days)
-        def framed_history():
+        def framed_history(items):
             # Ручной ответ может быть первым сохранённым событием диалога.
             # Сохраняем его, добавив нейтральное начало для Chat Completions.
-            if history and history[0]['role'] == 'assistant':
-                return [{'role': 'user', 'content': 'Сохранённые предыдущие ответы Гуся:'}] + history
-            return history
-        while len(history) > 1 and estimate_tokens(prefix + framed_history()) > self.config.memory.context_token_budget:
+            if items and items[0]['role'] == 'assistant':
+                return [{'role': 'user', 'content': 'Сохранённые предыдущие ответы Гуся:'}] + items
+            return items
+        while len(history) > 1 and estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
             history.pop(0)
-        history = framed_history()
-        if not history or estimate_tokens(prefix + history) > self.config.memory.context_token_budget:
+        if not history or estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
             raise ModelError("context_limit")
-        return prefix + history
+        body = next((m['content'] for m in reversed(history) if m['role'] == 'user'), '')
+        preferences = await self.database.language_preferences(jid)
+        if preferences['enabled'] and not opted_out(body):
+            enriched = [*prefix, {'role': 'system', 'content': instructions(preferences)}]
+            recent = list(history)
+            # Не теряем ближайшие четыре сообщения ради необязательной функции.
+            # Старую часть окна можно сократить; текущий вопрос всегда остаётся.
+            while len(recent) > 4 and estimate_tokens(enriched + framed_history(recent)) > self.config.memory.context_token_budget:
+                recent.pop(0)
+            if estimate_tokens(enriched + framed_history(recent)) <= self.config.memory.context_token_budget:
+                return enriched + framed_history(recent), body, preferences
+            log.info('language_feedback_skipped reason=context_budget')
+        return prefix + framed_history(history), body, None
 
     async def _deliver(self, jid, state, job, text, *, error=False, like=False):
         if not await self._valid(jid, job):
@@ -274,12 +292,15 @@ class Dialogues:
                                 continue
                             if self.social:
                                 self.social.note_question(jid)
-                            context = await self._context(jid, job)
+                            context, body, preferences = await self._context(jid, job)
                             if not await self._valid(jid, job):
                                 continue
                             if self.social:
                                 token = self.social.start_typing(jid, target=job.typing_target)
                             text, like = answer_metadata(await self.model.complete(context))
+                            text = render_feedback(text, body, preferences)
+                            if not text:
+                                raise ModelError('invalid_response')
                     await self._deliver(jid, state, job, text, like=like)
                 except (ModelError, ConfigError, TimeoutError) as exc:
                     code = exc.code if isinstance(exc, ModelError) else "configuration" if isinstance(exc, ConfigError) else "timeout"

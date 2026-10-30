@@ -9,6 +9,7 @@ from typing import Protocol
 import httpx
 
 from .config import LlmConfig
+from .language import PREFIX
 
 
 class ModelError(Exception):
@@ -108,10 +109,19 @@ class OpenAICompatible:
             if message.get("tool_calls") or not isinstance(result, str) or not result.strip():
                 raise ValueError
             # XML 1.0 не допускает NUL, суррогаты и часть управляющих символов.
-            if any(not (c in "\t\n\r" or 0x20 <= ord(c) <= 0xD7FF
-                        or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF) for c in result):
+            def valid_xml(text):
+                return all(c in "\t\n\r" or 0x20 <= ord(c) <= 0xD7FF
+                           or 0xE000 <= ord(c) <= 0xFFFD or 0x10000 <= ord(c) <= 0x10FFFF for c in text)
+            index = result.find(PREFIX)
+            answer = result[:index] if index >= 0 else result
+            if not valid_xml(answer):
                 raise ValueError
+            if not valid_xml(result):
+                # Невалидный необязательный хвост не отнимает уже готовый ответ.
+                result = answer
             result = result.strip()
+            if not result:
+                raise ValueError
             return result if len(result) <= 4096 else result[:4095] + "…"
         except (ValueError, TypeError, KeyError, IndexError, RecursionError):
             raise ModelError("invalid_response") from None
