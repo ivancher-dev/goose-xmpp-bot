@@ -66,6 +66,17 @@ asyncio.run(main())
     print('Обновление 0.3.4 → 0.3.5 с пробной миграцией', flush=True)
     run([app / 'bin/goose-update', '--ref', target])
     assert run([app / 'venv/bin/goose-bot', '--version']) == '0.3.5'
+    # В --local System.start выполняет doctor, а не запускает рабочий XMPP.
+    # Воспроизводим именно инициализацию БД первого настоящего run.
+    initialize = '''
+import asyncio,sys
+from pathlib import Path
+from goose.config import load_config
+from goose.storage import Database
+c=load_config(Path(sys.argv[1]))
+asyncio.run(Database(c.data_dir,c.jid).initialize(c.users))
+'''
+    run([app / 'venv/bin/python', '-c', initialize, config])
     assert old_tables() == before and all(p.read_bytes() == value for p, value in kept.items())
     preferences = '''
 import asyncio,sys
