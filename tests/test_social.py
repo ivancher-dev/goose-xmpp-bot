@@ -98,6 +98,31 @@ async def test_typing_during_api_and_stop_after_encrypted_answer(social):
             assert not msg['body']
 
 
+@pytest.mark.parametrize('fenced', [False, True])
+async def test_language_feedback_like_and_typing_share_one_encrypted_reply(social, fenced):
+    import json
+    from goose.language import MARKER
+    client, model, plugin, sent, _ = social
+    await client.dialogues.update_language(CHILD, 'enabled', True)
+    location = {'source': 'зилёная'} if fenced else {'start': 3, 'end': 3}
+    payload = {'language': 'ru', 'notes': [{**location, 'correction': 'зелёная',
+        'rule': 'Проверим: зе́лень.', 'example': 'Зелёная трава.'}]}
+    metadata = json.dumps(payload, ensure_ascii=False)
+    if fenced:
+        metadata = '\n```\n' + metadata + '\n```'
+    model.complete.return_value = LIKE + '\nОтвет о хлорофилле.\n' + MARKER + metadata
+    await client.process_message(event(CHILD + '/phone', OWN, 'Почему трава зилёная', ident='language-id'))
+    await idle(client)
+    assert model.complete.await_count == 1
+    body = plugin.encrypt_message.await_args.args[0]['body']
+    assert body.startswith('Ответ о хлорофилле.') and '«зилёная» → «зелёная»' in body
+    assert MARKER not in body and LIKE not in body
+    assert '```' not in body
+    assert standalone_states(sent) == [(CHILD + '/phone', 'composing'), (CHILD + '/phone', 'active')]
+    assert reactions(sent)[0]['reactions']['id'] == 'language-id'
+    assert (await client.database.history(CHILD, 100, 24, 30))[-1]['content'] == body
+
+
 @pytest.mark.parametrize('action', ['hold', 'manual', 'clear', 'profile', 'archive'])
 async def test_cancel_stops_typing_before_api_returns_and_never_likes(social, action):
     client, model, _, sent, _ = social

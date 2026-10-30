@@ -12,6 +12,7 @@ import time
 from omemo.storage import Just, Nothing, Storage
 
 from .config import ConfigError, TransientError, profile_value
+from .language import DEFAULTS, preference_value
 
 
 @contextmanager
@@ -56,7 +57,7 @@ class Database:
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -90,16 +91,36 @@ class Database:
             db.execute("""CREATE TABLE IF NOT EXISTS archive_cursors (
                 jid TEXT PRIMARY KEY, anchor TEXT, stamp REAL NOT NULL,
                 confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0, 1)))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS language_feedback (
+                jid TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+                mode TEXT NOT NULL DEFAULT 'brief' CHECK(mode IN ('brief','detailed')),
+                max_notes INTEGER NOT NULL DEFAULT 2 CHECK(max_notes BETWEEN 1 AND 5))""")
             for jid, fields in profiles.items():
                 db.execute("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)",
                            (jid, fields["grade"], fields["academic_year"], fields["schedule_class_id"], fields["explanation_style"]))
-            db.execute("PRAGMA user_version=4")
+            db.execute("PRAGMA user_version=5")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
     async def profile(self, jid):
         row = await self.call(lambda db: db.execute("SELECT * FROM profiles WHERE jid=?", (jid,)).fetchone())
         return dict(row) if row else None
+
+    async def language_preferences(self, jid):
+        row = await self.call(lambda db: db.execute(
+            "SELECT enabled,mode,max_notes FROM language_feedback WHERE jid=?", (jid,)).fetchone())
+        return {'enabled': bool(row['enabled']), 'mode': row['mode'], 'max_notes': row['max_notes']} if row else dict(DEFAULTS)
+
+    async def update_language(self, jid, field, value):
+        preference_value(field, value)
+        def update(db):
+            if db.execute('SELECT 1 FROM profiles WHERE jid=?', (jid,)).fetchone() is None:
+                raise ConfigError('Профиль не найден.')
+            db.execute('INSERT OR IGNORE INTO language_feedback(jid) VALUES(?)', (jid,))
+            # Имя поля проверено по закрытому списку; значения параметризованы.
+            db.execute(f'UPDATE language_feedback SET {field}=? WHERE jid=?', (value, jid))
+            db.execute('UPDATE dialogues SET revision=revision+1 WHERE jid=?', (jid,))
+        await self.call(update)
 
     async def weather_location(self, jid):
         row = await self.call(lambda db: db.execute(

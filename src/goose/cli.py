@@ -56,7 +56,7 @@ def doctor(config):
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
             schema = db.execute("PRAGMA user_version").fetchone()[0]
-            if schema not in (1, 2, 3, 4):
+            if schema not in (1, 2, 3, 4, 5):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
@@ -67,6 +67,7 @@ def doctor(config):
     print("Модель: " + ("включена; auto восстанавливается после проверки архива" if config.llm.enabled else "отключена"))
     print("Служебный набор: " + ("включён" if config.interaction.typing_enabled else "отключён") +
           "; реакции: " + ("включены" if config.interaction.reactions_enabled else "отключены"))
+    print('Языковые комментарии: настройки отдельно по собеседникам, по умолчанию выключены.')
     print("Ручная отправка включает manual; временный сбой архива ставит auto на паузу до повтора. "
           "Утраченная позиция требует подтверждения владельца.")
     print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
