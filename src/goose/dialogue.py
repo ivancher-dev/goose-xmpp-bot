@@ -235,7 +235,9 @@ class Dialogues:
         body = next((m['content'] for m in reversed(history) if m['role'] == 'user'), '')
         preferences = await self.database.language_preferences(jid)
         if preferences['enabled'] and not opted_out(body):
-            enriched = [*prefix, {'role': 'system', 'content': instructions(preferences)}]
+            # Общие правила ответа и его формата передаём одним system-блоком.
+            enriched = [{**prefix[0], 'content': prefix[0]['content'] + '\n\n' + instructions(preferences)},
+                        *prefix[1:]]
             recent = list(history)
             # Не теряем ближайшие четыре сообщения ради необязательной функции.
             # Старую часть окна можно сократить; текущий вопрос всегда остаётся.

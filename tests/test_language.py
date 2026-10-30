@@ -128,7 +128,7 @@ async def test_main_answer_then_feedback_one_request_no_rewriting_and_isolation(
     assert len(model.calls) == 2
     first = next(c for c in model.calls if c[-1]['content'] == 'Почему трава зилёная?')
     second = next(c for c in model.calls if c[-1]['content'] == 'Отдельный вопрос без замечаний')
-    assert lang.MARKER in str(first) and lang.MARKER not in str(second)
+    assert lang.MARKER in first[0]['content'] and lang.MARKER not in str(second)
     assert all('@example.org' not in str(context) for context in model.calls)
     assert 'Отдельный вопрос' not in str(first) and 'зилёная' not in str(second)
     child = next(text for jid, text in sent if jid == CHILD)
@@ -279,7 +279,7 @@ async def test_feedback_fits_with_full_persona_like_rules_and_long_recent_answer
     row = await database.dialogue(CHILD)
     context, body, preference = await engine._context(CHILD, Job(turn, row['revision'], engine.clock()+60))
     assert preference and preference['enabled']
-    assert lang.MARKER in str(context) and LIKE_RULE in context[0]['content']
+    assert lang.MARKER in context[0]['content'] and LIKE_RULE in context[0]['content']
     assert any('Объяснение учебной темы.' in m['content'] for m in context)
     assert any('Простой ответ на следующий вопрос.' in m['content'] for m in context)
     assert body == 'Почему листья жёлтые?' and estimate_tokens(context) <= 9000
