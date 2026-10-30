@@ -239,9 +239,9 @@ class Dialogues:
             enriched = [{**prefix[0], 'content': prefix[0]['content'] + '\n\n' + instructions(preferences, body)},
                         *prefix[1:]]
             recent = list(history)
-            # Не теряем ближайшие четыре сообщения ради необязательной функции.
-            # Старую часть окна можно сократить; текущий вопрос всегда остаётся.
-            while len(recent) > 4 and estimate_tokens(enriched + framed_history(recent)) > self.config.memory.context_token_budget:
+            # Сохраняем текущий вопрос и ближайший обмен, обычно три сообщения.
+            # Более старый непарный ответ не должен вытеснять сам разбор.
+            while len(recent) > 3 and estimate_tokens(enriched + framed_history(recent)) > self.config.memory.context_token_budget:
                 recent.pop(0)
             if estimate_tokens(enriched + framed_history(recent)) <= self.config.memory.context_token_budget:
                 log.info('language_feedback_requested')

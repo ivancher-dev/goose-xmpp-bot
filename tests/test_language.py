@@ -361,6 +361,28 @@ async def test_feedback_fits_with_full_persona_like_rules_and_long_recent_answer
     assert body == 'Почему листья жёлтые?' and estimate_tokens(context) <= 9000
 
 
+async def test_feedback_drops_only_older_answer_when_latest_exchange_needs_room(system, database):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from goose.dialogue import Job
+    engine, _, _, _ = system
+    engine.config.llm.persona_file.write_text((Path(__file__).resolve().parents[1] / 'config/persona.example.md').read_text())
+    await engine.update_language(CHILD, 'enabled', True)
+    await engine.set_mode(CHILD, 'auto')
+    engine.social = SimpleNamespace(can_like=lambda *args: True, stop_typing=lambda *args: None)
+    old = await database.add_user_message(CHILD, 'Старый вопрос')
+    await database.add_assistant_message(CHILD, old, 'Старое длинное объяснение. ' * 35)
+    latest = await database.add_user_message(CHILD, 'Вопрос из ближайшего обмена')
+    await database.add_assistant_message(CHILD, latest, 'Ответ из ближайшего обмена. ' * 10)
+    current = await database.add_user_message(CHILD, 'Новый вопрос с опечаткой')
+    revision = (await database.dialogue(CHILD))['revision']
+    context, _, preference = await engine._context(CHILD, Job(current, revision, engine.clock()+60))
+    assert preference and preference['enabled']
+    assert estimate_tokens(context) <= 9000
+    assert [m['content'] for m in context if m['role'] == 'user'] == ['Вопрос из ближайшего обмена', 'Новый вопрос с опечаткой']
+    assert any(m['role'] == 'assistant' and m['content'].startswith('Ответ из ближайшего обмена.') for m in context)
+
+
 @pytest.mark.parametrize('case,reason', [
     ('missing', 'missing_metadata'), ('broken', 'invalid_metadata'),
     ('empty', 'no_notes'), ('uncertain', 'uncertain_language'),
