@@ -119,8 +119,7 @@ async def main():
   assert 'попыток API: 3' in report and 'всего — 146' in report
   assert (await db.language_preferences('pupil2@example.org'))['enabled']
   assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==7
-  await engine.set_mode('parent@example.org','auto')
-  await engine.restore('parent@example.org',('pending-owner',),'manual','Незавершённая пауза',now[0],live=True)
+  await engine.restore('pupil2@example.org',('pending-owner',),'manual','Незавершённая пауза',now[0],live=True)
  finally: await engine.close()
 asyncio.run(main())
 '''
