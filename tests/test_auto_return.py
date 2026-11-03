@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from goose.config import ConfigError, load_config
-from goose.dialogue import Dialogues
+from goose.dialogue import Dialogues, estimate_tokens
 from goose.model import OpenAICompatible
 from goose.storage import Database
 import goose.storage as storage
@@ -334,7 +334,71 @@ async def test_three_recent_questions_get_one_combined_reply(auto_system):
     model.complete.side_effect = [json.dumps({'certain': True, 'unanswered': turns}), 'Общее пояснение']
     now[0] += 61; await engine.resume_takeovers(); await idle(engine)
     assert sent == [(CHILD, 'Общее пояснение')]
-    assert 'Почему?\nКак это работает?\nА пример?' in model.complete.call_args.args[0][-1]['content']
+    context = model.complete.call_args.args[0]
+    for question in ('Почему?', 'Как это работает?', 'А пример?'):
+        assert sum(question in m['content'] for m in context) == 1
+    assert all(str(turn) in context[-1]['content'] for turn in turns)
+
+
+async def test_followup_keeps_required_exchange_without_old_full_history(auto_system):
+    engine, model, sent, now = auto_system
+    engine.config.llm.persona_file.write_text('Позитивный учебный помощник. ' * 60)
+    for i in range(12):
+        turn = await engine.database.add_user_message(CHILD, f'Старая тема {i}: ' + 'я' * 150)
+        await engine.database.add_assistant_message(CHILD, turn, 'Старое пояснение: ' + 'б' * 280)
+    await manual(engine, now)
+    question = 'Как устроен бумажный самолёт и почему он летит?'
+    await engine.submit(CHILD, question)
+    turn = (await engine.database.dialogue(CHILD))['next_turn']
+    await manual(engine, now, text='Первая короткая подсказка.', ident='hint1')
+    await manual(engine, now, text='Вторая короткая подсказка.', ident='hint2')
+    model.complete.side_effect = [json.dumps({'certain': True, 'unanswered': [turn]}), 'Продолжение объяснения.']
+    now[0] += 61; await engine.resume_takeovers(); await idle(engine)
+    assert sent == [(CHILD, 'Продолжение объяснения.')]
+    assert model.complete.await_count == 2
+    context = model.complete.call_args.args[0]
+    combined = '\n'.join(m['content'] for m in context)
+    assert 'Старая тема' not in combined and 'Старое пояснение' not in combined
+    assert 'Первая короткая подсказка.' in combined and 'Вторая короткая подсказка.' in combined
+    assert combined.count(question) == 1
+    assert 'Позитивный учебный помощник.' in combined and 'Текущий класс: 2' in combined
+    assert estimate_tokens(context) <= engine.config.memory.context_token_budget
+
+
+async def test_followup_preserves_manual_replies_beyond_normal_history_window(auto_system):
+    engine, model, sent, now = auto_system
+    turn = await question_during_pause(engine, now)
+    await manual(engine, now, text='Важная первая подсказка.', ident='first-hint')
+    for i in range(26):
+        await manual(engine, now, text=f'Короткое дополнение {i}.', ident=f'addition-{i}')
+    model.complete.side_effect = [json.dumps({'certain': True, 'unanswered': [turn]}), 'Общее продолжение']
+    now[0] += 61; await engine.resume_takeovers(); await idle(engine)
+    assert sent == [(CHILD, 'Общее продолжение')]
+    combined = '\n'.join(m['content'] for m in model.complete.call_args.args[0])
+    assert 'Важная первая подсказка.' in combined and 'Короткое дополнение 25.' in combined
+
+
+async def test_mandatory_followup_overflow_skips_before_paid_review(auto_system, caplog):
+    engine, model, sent, now = auto_system
+    engine.config.llm.persona_file.write_text('Ж' * 4090)
+    await question_during_pause(engine, now)
+    caplog.set_level('INFO', logger='goose')
+    now[0] += 61; await engine.resume_takeovers(); await idle(engine)
+    assert await engine.mode(CHILD) == 'auto'
+    assert not sent and not model.complete.called
+    assert 'takeover_review_skipped reason=followup_budget' in caplog.text
+
+
+async def test_followup_frames_leading_manual_reply_without_losing_evidence(auto_system):
+    engine, model, sent, now = auto_system
+    turn = await question_during_pause(engine, now)
+    await engine.restore(CHILD, ('earlier-stamp',), 'manual', 'Подсказка с более ранним временем.', now[0]-1, live=True)
+    model.complete.side_effect = [json.dumps({'certain': True, 'unanswered': [turn]}), 'Продолжение']
+    now[0] += 61; await engine.resume_takeovers(); await idle(engine)
+    assert sent == [(CHILD, 'Продолжение')]
+    conversation = [m for m in model.complete.call_args.args[0] if m['role'] != 'system']
+    assert conversation[0]['role'] == 'user'
+    assert any(m['content'] == 'Подсказка с более ранним временем.' for m in conversation)
 
 
 async def test_schema_six_upgrade_preserves_explicit_manual_usage_and_identity(config, database):

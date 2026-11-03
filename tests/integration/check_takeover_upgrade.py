@@ -1,10 +1,11 @@
-"""Установленное обновление 0.3.11/схема 6 → текущий код/схема 7.
+"""Установленное обновление с выбранного baseline → текущий код/схема 7.
 
 Запуск из чистого коммита. Сеть только для pip с lock/хешами; API подставной,
 XMPP и системный systemd не запускаются. Данные целиком синтетические.
 """
 
 from contextlib import closing
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -14,7 +15,7 @@ import tempfile
 import tomllib
 
 
-def main():
+def main(baseline_ref='5f6d26030ba6306a132b51e7ae7bcfe736c54264'):
     source = Path(__file__).resolve().parents[2]
     lab = Path(tempfile.mkdtemp(prefix='goose-takeover-upgrade-', dir='/tmp'))
     repo, app, data, cfg = (lab/name for name in ('repo','app','data','config'))
@@ -25,15 +26,16 @@ def main():
         return result.stdout.strip()
     target = run(['git','-C',source,'rev-parse','HEAD'])
     version = tomllib.loads(run(['git','-C',source,'show',target+':pyproject.toml']))['project']['version']
+    baseline_version = tomllib.loads(run(['git','-C',source,'show',baseline_ref+':pyproject.toml']))['project']['version']
     run(['git','clone','--no-hardlinks',source,repo])
-    run(['git','-C',repo,'switch','--detach','5f6d26030ba6306a132b51e7ae7bcfe736c54264'])
+    run(['git','-C',repo,'switch','--detach',baseline_ref])
     config = cfg/'config.toml'
-    print(f'Лаборатория: {lab}; установка 0.3.11', flush=True)
+    print(f'Лаборатория: {lab}; установка {baseline_version}', flush=True)
     run(['bash',repo/'scripts/install.sh','--local','--prefix',app,'--config',config,
          '--data-dir',data,'--env-file',cfg/'goose.env'])
     config.write_text(config.read_text().replace('/etc/goose-xmpp-bot/persona.md',str(cfg/'persona.md')))
     (cfg/'goose.env').write_text('GOOSE_XMPP_PASSWORD="fixture-password"\nGOOSE_LLM_API_KEY="fixture-key"\n')
-    (cfg/'persona.md').write_text('Синтетический сохраняемый образ.\n')
+    (cfg/'persona.md').write_text('Позитивный учебный помощник. ' * 60)
     seed = '''
 import asyncio,sys,time
 from pathlib import Path
@@ -45,6 +47,9 @@ async def main():
  await db.set_mode('pupil1@example.org','manual');await db.set_mode('pupil2@example.org','auto')
  await db.update_language('pupil2@example.org','enabled',True)
  await db.add_user_message('pupil2@example.org','Синтетическая память до обновления')
+ for i in range(12):
+  turn=await db.add_user_message('pupil2@example.org',f'Старая тема {i}: '+'я'*150)
+  await db.add_assistant_message('pupil2@example.org',turn,'Старое пояснение: '+'б'*280)
  await db.set_weather_location('pupil2@example.org',{'id':123,'name':'Fixture'})
  await OmemoStorage(db)._store('fixture-key',{'identity':'preserved','trust':'TRUSTED'})
  await db.start_api_usage('before','before-call','pupil2@example.org','https://api.example.org/v1','fixture-model',1,time.time())
@@ -52,6 +57,9 @@ async def main():
 asyncio.run(main())
 '''
     run([app/'venv/bin/python','-c',seed,config])
+    with closing(sqlite3.connect(data/'goose.sqlite3')) as db:
+        baseline_schema = db.execute('PRAGMA user_version').fetchone()[0]
+        baseline_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
     backup = app/'bin/goose-backup'
     run([backup,'enable'])
     old = next((lab/'app-backups/scheduled').glob('daily-*'))
@@ -61,12 +69,10 @@ asyncio.run(main())
     kept = {p:p.read_bytes() for p in keep}
     def old_rows():
         with closing(sqlite3.connect(data/'goose.sqlite3')) as db:
-            names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                     if r[0] not in {'takeover_pauses', 'takeover_answers'}]
-            return {name:list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in names}
+            return {name:list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in baseline_tables}
     before = old_rows()
     run(['git','-C',repo,'switch','--detach',target])
-    print(f'Проверка updater 0.3.11 → {version}',flush=True)
+    print(f'Проверка updater {baseline_version} → {version}',flush=True)
     run([app/'bin/goose-update','--ref',target])
     assert run([app/'venv/bin/goose-bot','--version']) == version
     initialize = '''
@@ -127,7 +133,7 @@ asyncio.run(main())
     run([backup,'restore-test',old])
     assert hashlib.sha256((old/'data/goose.sqlite3').read_bytes()).hexdigest()==digest
     with closing(sqlite3.connect(old/'data/goose.sqlite3')) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==6
+        assert db.execute('PRAGMA user_version').fetchone()[0]==baseline_schema
     run([backup,'create'])
     latest=max((lab/'app-backups/scheduled').glob('daily-*'),key=lambda p:p.name)
     assert json.loads((latest/'manifest.json').read_text())['schema']==7
@@ -138,8 +144,10 @@ asyncio.run(main())
     run([backup,'restore-test',latest])
     run([app/'venv/bin/python','-m','pip','check'])
     assert all(p.read_bytes()==value for p,value in kept.items())
-    print('PASS схема 6 → 7; ключи/настройки/статистика/таймер сохранены; auto/оценка/продолжение работают; restore схем 6/7 успешен',flush=True)
+    print(f'PASS схема {baseline_schema} → 7; ключи/настройки/статистика/таймер сохранены; длинный контекст/auto/продолжение работают; restore обеих копий успешен',flush=True)
 
 
 if __name__=='__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--baseline-ref', default='5f6d26030ba6306a132b51e7ae7bcfe736c54264')
+    main(parser.parse_args().baseline_ref)

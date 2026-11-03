@@ -53,6 +53,7 @@ class Job:
     review: bool = False
     candidates: tuple = ()
     questions: tuple = ()
+    review_history: tuple = ()
 
 
 @dataclass
@@ -288,6 +289,16 @@ class Dialogues:
         if estimate_tokens(messages) > self.config.memory.context_token_budget:
             log.info('takeover_review_skipped reason=context_budget')
             return None
+        prepared = replace(job, questions=tuple(candidates.items()),
+                           review_history=tuple((m['turn'], m['role'], m['body']) for m in history))
+        try:
+            # Не тратим оценку, если обязательный фрагмент с образом уже не помещается.
+            await self._context(jid, prepared)
+        except ModelError as error:
+            if error.code != 'context_limit':
+                raise
+            log.info('takeover_review_skipped reason=followup_budget')
+            return None
         if not await self._valid(jid, job):
             return None
         with usage_scope(self.database, jid):
@@ -298,7 +309,8 @@ class Dialogues:
         if not selected:
             log.info('takeover_review_skipped reason=no_clear_question')
             return None
-        return replace(job, questions=tuple((turn, candidates[turn]) for turn in selected))
+        log.info('takeover_review_selected count=%d', len(selected))
+        return replace(prepared, questions=tuple((turn, candidates[turn]) for turn in selected))
 
     async def _context(self, jid, job):
         profile = await self.database.profile(jid)
@@ -310,20 +322,28 @@ class Dialogues:
                   {"role": "system", "content":
                    f"Текущий класс: {profile['grade']}. Учебный год: {profile['academic_year']}. "
                    f"Стиль объяснения: {profile['explanation_style']}."}]
-        history = await self.database.history(jid, job.turn, self.config.memory.recent_messages,
-                                              self.config.memory.retention_days)
-        if job.questions:
-            prefix[0]['content'] += '\n\n' + FOLLOWUP_RULE
-            history.append({'role': 'user', 'content': 'Оставшиеся вопросы:\n' +
-                            '\n'.join(body for _, body in job.questions)})
         def framed_history(items):
             # Ручной ответ может быть первым сохранённым событием диалога.
-            # Сохраняем его, добавив нейтральное начало для Chat Completions.
             if items and items[0]['role'] == 'assistant':
                 return [{'role': 'user', 'content': 'Сохранённые предыдущие ответы Гуся:'}] + items
             return items
-        if job.review and estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
-            raise ModelError('context_limit')
+        if job.review:
+            if not job.questions or not job.review_history:
+                raise ModelError('configuration')
+            prefix[0]['content'] += '\n\n' + FOLLOWUP_RULE
+            # Тот же полный фрагмент, по которому оценивались ответы человека.
+            # Обычное окно истории могло бы добавить лишнее или отрезать начало.
+            history = [{'role': role, 'content': f'[Сообщение {turn}]\n{body}' if role == 'user' else body}
+                       for turn, role, body in job.review_history]
+            history.append({'role': 'user', 'content':
+                'Продолжи только неотвеченные части вопросов из сообщений: ' +
+                ', '.join(str(turn) for turn, _ in job.questions) + '.'})
+            result = prefix + framed_history(history)
+            if estimate_tokens(result) > self.config.memory.context_token_budget:
+                raise ModelError('context_limit')
+            return result, '', None
+        history = await self.database.history(jid, job.turn, self.config.memory.recent_messages,
+                                              self.config.memory.retention_days)
         while len(history) > 1 and estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
             history.pop(0)
         if not history or estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
