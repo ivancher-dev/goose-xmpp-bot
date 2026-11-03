@@ -33,9 +33,10 @@ def main(baseline_ref='5f6d26030ba6306a132b51e7ae7bcfe736c54264'):
     print(f'Лаборатория: {lab}; установка {baseline_version}', flush=True)
     run(['bash',repo/'scripts/install.sh','--local','--prefix',app,'--config',config,
          '--data-dir',data,'--env-file',cfg/'goose.env'])
-    config.write_text(config.read_text().replace('/etc/goose-xmpp-bot/persona.md',str(cfg/'persona.md')))
+    config.write_text(config.read_text().replace('/etc/goose-xmpp-bot/persona.md',str(cfg/'persona.md'))
+                      .replace('context_token_budget = 9000', 'context_token_budget = 6000'))
     (cfg/'goose.env').write_text('GOOSE_XMPP_PASSWORD="fixture-password"\nGOOSE_LLM_API_KEY="fixture-key"\n')
-    (cfg/'persona.md').write_text('Позитивный учебный помощник. ' * 60)
+    (cfg/'persona.md').write_text(('Дружелюбный учебный помощник. ' * 100).encode()[:4029].decode('utf-8', errors='ignore'))
     seed = '''
 import asyncio,sys,time
 from pathlib import Path
@@ -91,7 +92,7 @@ from pathlib import Path
 import httpx
 from goose.commands import Commands
 from goose.config import load_config
-from goose.dialogue import Dialogues
+from goose.dialogue import Dialogues,estimate_tokens
 from goose.model import OpenAICompatible
 from goose.storage import Database
 async def main():
@@ -102,7 +103,12 @@ async def main():
   messages=json.loads(request.content)['messages']
   if 'candidate_ids' in messages[-1]['content']:
    ids=json.loads(messages[-1]['content'])['candidate_ids'];text=json.dumps({'certain':True,'unanswered':ids})
-  else: text='Синтетическое продолжение'
+  else:
+   assert estimate_tokens(messages)<=c.memory.context_token_budget==6000
+   combined=' '.join(m['content'] for m in messages)
+   assert 'Старая тема' not in combined and 'Старое пояснение' not in combined
+   assert 'Первая подсказка.' in combined and 'Вторая подсказка.' in combined
+   text='Синтетическое продолжение'
   return httpx.Response(200,json={'choices':[{'message':{'content':text}}],'usage':{'prompt_tokens':10,'completion_tokens':3,'total_tokens':13}})
  model=OpenAICompatible(llm,transport=httpx.MockTransport(response))
  async def prepare(jid,text):
@@ -115,6 +121,9 @@ async def main():
   await engine.set_mode('pupil2@example.org','auto')
   await engine.restore('pupil2@example.org',('manual',),'manual','Минутку',now[0],live=True)
   await engine.submit('pupil2@example.org','Новый синтетический вопрос')
+  now[0]=time.time()
+  await engine.restore('pupil2@example.org',('hint1',),'manual','Первая подсказка.',now[0],live=True)
+  await engine.restore('pupil2@example.org',('hint2',),'manual','Вторая подсказка.',now[0],live=True)
   now[0]+=61;await engine.resume_takeovers()
   await asyncio.wait_for(asyncio.gather(*tuple(engine.tasks)),3)
   assert sent==[('pupil2@example.org','Синтетическое продолжение')]

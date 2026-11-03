@@ -333,10 +333,10 @@ class Dialogues:
             prefix[0]['content'] += '\n\n' + FOLLOWUP_RULE
             # Тот же полный фрагмент, по которому оценивались ответы человека.
             # Обычное окно истории могло бы добавить лишнее или отрезать начало.
-            history = [{'role': role, 'content': f'[Сообщение {turn}]\n{body}' if role == 'user' else body}
+            history = [{'role': role, 'content': f'[{turn}]\n{body}' if role == 'user' else body}
                        for turn, role, body in job.review_history]
             history.append({'role': 'user', 'content':
-                'Продолжи только неотвеченные части вопросов из сообщений: ' +
+                'Ответь на сообщения: ' +
                 ', '.join(str(turn) for turn, _ in job.questions) + '.'})
             result = prefix + framed_history(history)
             if estimate_tokens(result) > self.config.memory.context_token_budget:

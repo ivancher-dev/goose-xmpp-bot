@@ -401,6 +401,23 @@ async def test_followup_frames_leading_manual_reply_without_losing_evidence(auto
     assert any(m['content'] == 'Подсказка с более ранним временем.' for m in conversation)
 
 
+async def test_legacy_six_thousand_budget_keeps_large_persona_and_manual_replies(auto_system):
+    engine, model, sent, now = auto_system
+    persona = ('Дружелюбный учебный помощник. ' * 100).encode()[:4029].decode('utf-8', errors='ignore')
+    engine.config.llm.persona_file.write_text(persona)
+    engine.config = replace(engine.config, memory=replace(engine.config.memory, context_token_budget=6000))
+    turn = await question_during_pause(engine, now)
+    await manual(engine, now, text='Первая подсказка.', ident='first')
+    await manual(engine, now, text='Вторая подсказка.', ident='second')
+    model.complete.side_effect = [json.dumps({'certain': True, 'unanswered': [turn]}), 'Продолжение']
+    now[0] += 61; await engine.resume_takeovers(); await idle(engine)
+    assert sent == [(CHILD, 'Продолжение')]
+    context = model.complete.call_args.args[0]
+    assert estimate_tokens(context) <= 6000
+    assert persona.strip() in context[0]['content']
+    assert 'Первая подсказка.' in str(context) and 'Вторая подсказка.' in str(context)
+
+
 async def test_schema_six_upgrade_preserves_explicit_manual_usage_and_identity(config, database):
     await database.set_mode(CHILD, 'manual')
     await database.set_mode(OTHER, 'auto')
