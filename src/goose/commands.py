@@ -1,6 +1,9 @@
 """Детерминированные команды: права проверяются до обращения к модели."""
 
+import time
+
 from .config import ConfigError, bare_jid
+from .usage import usage_report
 
 
 HELP = ("Диагностические команды: !help, !ping. Очистка своей памяти: !context clear. "
@@ -9,6 +12,7 @@ HELP = ("Диагностические команды: !help, !ping. Очист
         "!admin user set <bare_jid> grade=N|academic_year=YYYY-YYYY|schedule_class_id=ID. "
         "Режим диалога: !admin mode <bare_jid> [manual|auto]. "
         "Языковые комментарии: !admin language <bare_jid> [on|off|mode=brief|mode=detailed|max_notes=N]. "
+        "Статистика API: !admin usage [all|bare_jid] [today|month|YYYY-MM-DD|YYYY-MM]. "
         "Ручная отправка с другого устройства Гуся включает manual этого диалога. "
         "После подключения auto восстанавливается только при успешной проверке архива; "
         "при неполном архиве подтвердите auto явно. "
@@ -18,10 +22,11 @@ HELP = ("Диагностические команды: !help, !ping. Очист
 
 
 class Commands:
-    def __init__(self, config, database, status=lambda: "Этап 3; модель отключена.", dialogues=None):
+    def __init__(self, config, database, status=lambda: "Этап 3; модель отключена.", dialogues=None, *, clock=time.time):
         self.config, self.database, self.status = config, database, status
         self.dialogues = dialogues
         self.facts = None
+        self.clock = clock
 
     async def handle(self, sender, body):
         sender = bare_jid(sender)
@@ -56,6 +61,19 @@ class Commands:
         if words == ["!admin", "status"]:
             return self.status()
         try:
+            if words[1:2] == ['usage']:
+                args, target, period = words[2:], None, 'today'
+                if len(args) > 2:
+                    raise ConfigError('Использование: !admin usage [all|bare_jid] [today|month|YYYY-MM-DD|YYYY-MM].')
+                if args and (len(args) == 2 or args[0] == 'all' or '@' in args[0]):
+                    value, *args = args
+                    if value != 'all':
+                        target = bare_jid(value, allow_resource=False)
+                        if target not in self.config.allowed or await self.database.profile(target) is None:
+                            raise ConfigError('Профиль не найден.')
+                if args:
+                    period = args[0]
+                return await usage_report(self.config, self.database, target, period, self.clock())
             if len(words) in (3, 4) and words[1] == 'language':
                 target = bare_jid(words[2], allow_resource=False)
                 if target not in self.config.allowed or await self.database.profile(target) is None:

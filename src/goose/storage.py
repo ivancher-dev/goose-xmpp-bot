@@ -13,6 +13,7 @@ from omemo.storage import Just, Nothing, Storage
 
 from .config import ConfigError, TransientError, profile_value
 from .language import DEFAULTS, preference_value
+from .usage import MAX_ROWS, OUTCOMES, RETENTION_DAYS
 
 
 @contextmanager
@@ -57,7 +58,7 @@ class Database:
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -95,16 +96,79 @@ class Database:
                 jid TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
                 mode TEXT NOT NULL DEFAULT 'brief' CHECK(mode IN ('brief','detailed')),
                 max_notes INTEGER NOT NULL DEFAULT 2 CHECK(max_notes BETWEEN 1 AND 5))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS api_usage (
+                id TEXT PRIMARY KEY, call_id TEXT NOT NULL, jid TEXT NOT NULL,
+                base_url TEXT NOT NULL, model TEXT NOT NULL, attempt INTEGER NOT NULL CHECK(attempt>=1),
+                started REAL NOT NULL, finished REAL, outcome TEXT NOT NULL DEFAULT 'pending',
+                prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+                CHECK(prompt_tokens IS NULL OR prompt_tokens>=0),
+                CHECK(completion_tokens IS NULL OR completion_tokens>=0),
+                CHECK(total_tokens IS NULL OR total_tokens>=0))""")
+            db.execute('CREATE INDEX IF NOT EXISTS api_usage_started ON api_usage(started)')
+            db.execute('CREATE INDEX IF NOT EXISTS api_usage_jid_started ON api_usage(jid,started)')
+            # После перезапуска нельзя выдавать незавершённый запрос за бесплатный.
+            db.execute("UPDATE api_usage SET outcome='interrupted',finished=? WHERE outcome='pending'", (time.time(),))
             for jid, fields in profiles.items():
                 db.execute("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)",
                            (jid, fields["grade"], fields["academic_year"], fields["schedule_class_id"], fields["explanation_style"]))
-            db.execute("PRAGMA user_version=5")
+            db.execute("PRAGMA user_version=6")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
     async def profile(self, jid):
         row = await self.call(lambda db: db.execute("SELECT * FROM profiles WHERE jid=?", (jid,)).fetchone())
         return dict(row) if row else None
+
+    async def start_api_usage(self, ident, call_id, jid, base_url, model, attempt, started):
+        def insert(db):
+            if db.execute('SELECT 1 FROM profiles WHERE jid=?', (jid,)).fetchone() is None:
+                raise ConfigError('Профиль не найден.')
+            # Штатный запрос ограничен минутами. Старые незакрытые записи не должны
+            # бесконечно расти при отказах финальной записи статистики.
+            db.execute("UPDATE api_usage SET outcome='interrupted',finished=? WHERE outcome='pending' AND started<?",
+                       (started, started - 3600))
+            db.execute('''INSERT INTO api_usage(id,call_id,jid,base_url,model,attempt,started)
+                          VALUES(?,?,?,?,?,?,?)''', (ident, call_id, jid, base_url, model, attempt, started))
+            db.execute("INSERT OR IGNORE INTO metadata VALUES('usage_started_at',?)", (str(started),))
+            removed = db.execute('''SELECT id,started FROM api_usage WHERE finished IS NOT NULL AND
+                (started<? OR id IN (SELECT id FROM api_usage ORDER BY started DESC,id DESC LIMIT -1 OFFSET ?))''',
+                (started - RETENTION_DAYS * 86400, MAX_ROWS)).fetchall()
+            if removed:
+                old = db.execute("SELECT value FROM metadata WHERE key='usage_cutoff'").fetchone()
+                cutoff = max(max(row['started'] for row in removed), float(old[0]) if old else float('-inf'))
+                db.execute("INSERT OR REPLACE INTO metadata VALUES('usage_cutoff',?)", (str(cutoff),))
+                db.executemany('DELETE FROM api_usage WHERE id=?', [(row['id'],) for row in removed])
+        await self.call(insert)
+
+    async def finish_api_usage(self, ident, outcome, counts, finished):
+        if outcome not in OUTCOMES or len(counts) != 3 or any(
+                v is not None and (type(v) is not int or not 0 <= v <= 2*10**9) for v in counts):
+            raise ValueError('Invalid usage result')
+        await self.call(lambda db: db.execute('''UPDATE api_usage SET outcome=?,finished=?,
+            prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=? AND outcome IN ('pending','interrupted') ''',
+            (outcome, finished, *counts, ident)))
+
+    async def api_usage(self, start, end, jid=None):
+        def read(db):
+            rows = db.execute('''SELECT jid,base_url,model,COUNT(*) AS attempts,
+                COUNT(DISTINCT call_id) AS calls, SUM(attempt>1) AS retries,
+                SUM(outcome='success') AS success, SUM(outcome='pending') AS pending,
+                COALESCE(SUM(prompt_tokens),0) AS prompt,
+                COALESCE(SUM(completion_tokens),0) AS completion,
+                COALESCE(SUM(total_tokens),0) AS total,
+                COUNT(prompt_tokens) AS prompt_known, COUNT(completion_tokens) AS completion_known,
+                COUNT(total_tokens) AS total_known,
+                SUM(prompt_tokens IS NOT NULL AND completion_tokens IS NOT NULL) AS complete,
+                COALESCE(SUM(CASE WHEN completion_tokens IS NOT NULL THEN prompt_tokens END),0) AS priced_prompt,
+                COALESCE(SUM(CASE WHEN prompt_tokens IS NOT NULL THEN completion_tokens END),0) AS priced_completion
+                FROM api_usage WHERE started>=? AND started<? AND outcome!='not_sent'
+                AND (? IS NULL OR jid=?) GROUP BY jid,base_url,model ORDER BY jid,base_url,model''',
+                (start, end, jid, jid)).fetchall()
+            values = dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('usage_started_at','usage_cutoff')"))
+            return [dict(row) for row in rows], {
+                'started': float(values['usage_started_at']) if 'usage_started_at' in values else None,
+                'cutoff': float(values['usage_cutoff']) if 'usage_cutoff' in values else None}
+        return await self.call(read)
 
     async def language_preferences(self, jid):
         row = await self.call(lambda db: db.execute(

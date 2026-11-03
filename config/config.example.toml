@@ -69,6 +69,14 @@ enabled = false
 source_url = ""
 timeout_seconds = 10
 
+# Учёт API работает без этой таблицы. Цены не заданы: денежной оценки нет.
+# [usage]
+# currency = "RUB"
+# Заполнять только по своему действующему тарифу; это не текущие цены провайдера.
+# price_model = "gpt://FOLDER_ID/aliceai-llm-flash/latest"
+# input_per_million = "100"
+# output_per_million = "200"
+
 # Начальные значения для новых профилей. После создания актуальные
 # профили хранятся в SQLite; перезапуск не сбрасывает изменения владельца.
 [users."pupil1@example.org"]

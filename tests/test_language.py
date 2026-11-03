@@ -556,7 +556,7 @@ async def test_manual_archive_duplicates_and_commands_do_not_start_language_revi
     assert len(model.calls) == len(sent) == 1
 
 
-async def test_migration_four_to_five_preserves_data_and_failure_rolls_back(config, database):
+async def test_migration_four_to_current_preserves_data_and_failure_rolls_back(config, database):
     await database.update_profile(CHILD, 'grade', 3)
     await database.set_mode(CHILD, 'auto')
     await database.add_user_message(CHILD, 'Синтетическая память')
@@ -567,7 +567,7 @@ async def test_migration_four_to_five_preserves_data_and_failure_rolls_back(conf
     before = await database.call(lambda c: list(c.execute('SELECT key,value FROM omemo')))
     reopened = Database(config.data_dir, config.jid)
     await reopened.initialize(config.users)
-    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 5
+    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 6
     assert (await reopened.profile(CHILD))['grade'] == 3
     assert (await reopened.dialogue(CHILD))['mode'] == 'auto'
     assert (await reopened.history(CHILD, 100, 24, 30))[0]['content'] == 'Синтетическая память'

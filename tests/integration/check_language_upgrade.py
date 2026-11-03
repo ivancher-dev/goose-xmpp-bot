@@ -1,4 +1,4 @@
-"""Настоящий переход 0.3.4/схема 4 → текущий код/схема 5 на временных данных.
+"""Настоящий переход 0.3.4/схема 4 → текущий код/схема 6 на временных данных.
 
 Запуск из чистого коммита. /tmp, локальный Git origin, pip по lock с хешами.
 Не требует root, XMPP, модели или systemd. Не входит в обычный pytest.
@@ -61,7 +61,7 @@ asyncio.run(main())
     def old_tables():
         with closing(sqlite3.connect(data / 'goose.sqlite3')) as db:
             names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                     if r[0] != 'language_feedback']
+                     if r[0] not in {'language_feedback', 'api_usage'}]
             return {name: list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in names}
     before = old_tables()
     run(['git', '-C', repo, 'switch', '--detach', target])
@@ -104,13 +104,13 @@ asyncio.run(main())
         assert db.execute('PRAGMA user_version').fetchone()[0] == 4
     run([command, 'create'])
     current = max((lab / 'app-backups/scheduled').glob('daily-*'), key=lambda p: p.name)
-    assert json.loads((current / 'manifest.json').read_text())['schema'] == 5
+    assert json.loads((current / 'manifest.json').read_text())['schema'] == 6
     run([command, 'restore-test', current])
     with closing(sqlite3.connect(current / 'data/goose.sqlite3')) as db:
         assert db.execute('SELECT enabled,mode,max_notes FROM language_feedback WHERE jid=?',
                           ('pupil1@example.org',)).fetchone() == (1, 'detailed', 3)
     run([app / 'venv/bin/python', '-m', 'pip', 'check'])
-    print('PASS схема 4 → 5; старые данные, образ и таймер сохранены; независимые настройки и restore схем 4/5', flush=True)
+    print('PASS схема 4 → 6; старые данные, образ и таймер сохранены; независимые настройки и restore схем 4/6', flush=True)
 
 
 if __name__ == '__main__':

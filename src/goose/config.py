@@ -1,6 +1,7 @@
 """Строгая конфигурация без вывода пользовательских значений в ошибках."""
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 import os
 from pathlib import Path
 import re
@@ -106,6 +107,14 @@ class InteractionConfig:
 
 
 @dataclass(frozen=True)
+class UsageConfig:
+    price_model: str = ''
+    currency: str = 'RUB'
+    input_per_million: Decimal | None = None
+    output_per_million: Decimal | None = None
+
+
+@dataclass(frozen=True)
 class WeatherConfig:
     enabled: bool = False
     provider: str = "open_meteo"
@@ -145,6 +154,7 @@ class Config:
     weather: WeatherConfig = WeatherConfig()
     news: NewsConfig = NewsConfig()
     interaction: InteractionConfig = InteractionConfig()
+    usage: UsageConfig = UsageConfig()
 
     def password(self) -> str:
         value = os.environ.get(self.password_env, "")
@@ -160,7 +170,7 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError("Не удалось прочитать TOML-конфигурацию.") from exc
     allowed_top = {"config_version", "timezone", "data_dir", "xmpp", "access", "runtime",
-                   "diagnostics", "users", "llm", "memory", "schedule", "weather", "news", "interaction"}
+                   "diagnostics", "users", "llm", "memory", "schedule", "weather", "news", "interaction", "usage"}
     if data.keys() - allowed_top or type(data.get("config_version")) is not int or data["config_version"] != 1:
         raise ConfigError("Неизвестные поля или неподдерживаемая config_version.")
     timezone = text(data, "timezone")
@@ -332,6 +342,29 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     interaction = table(data, 'interaction', {'typing_enabled', 'reactions_enabled'})
     interaction_config = InteractionConfig(typed(interaction, 'typing_enabled', bool, False),
                                            typed(interaction, 'reactions_enabled', bool, False))
+    usage = table(data, 'usage', {'price_model', 'currency', 'input_per_million', 'output_per_million'})
+    price_model = typed(usage, 'price_model', str, '')
+    currency = text(usage, 'currency', 'RUB')
+    if not re.fullmatch(r'[A-Z]{3}', currency) or len(price_model) > 128 or any(ord(c) < 32 for c in price_model):
+        raise ConfigError('usage: нужны трёхбуквенная валюта и корректный price_model.')
+    prices = []
+    for field in ('input_per_million', 'output_per_million'):
+        value = usage.get(field)
+        if value is None:
+            prices.append(None)
+            continue
+        try:
+            if type(value) not in (str, int, float) or len(str(value)) > 40:
+                raise ValueError
+            amount = Decimal(str(value))
+            if not amount.is_finite() or not 0 <= amount <= 10**9 or amount.normalize().as_tuple().exponent < -6:
+                raise ValueError
+        except (ValueError, InvalidOperation):
+            raise ConfigError('usage: цена за миллион токенов от 0 до 1000000000, до 6 десятичных знаков.') from None
+        prices.append(amount)
+    if (prices[0] is None) != (prices[1] is None) or (prices[0] is not None and not price_model.strip()):
+        raise ConfigError('usage: задайте обе цены и явный price_model либо оставьте цены незаданными.')
+    usage_config = UsageConfig(price_model, currency, *prices)
     return Config(jid, resource, password_env, data_dir, timezone, admins, allowed,
                   profiles, echo, level, attempts, timeout, llm_config, memory_config,
-                  weather_config, news_config, interaction_config)
+                  weather_config, news_config, interaction_config, usage_config)
