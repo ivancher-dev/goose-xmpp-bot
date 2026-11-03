@@ -18,6 +18,8 @@ HELP = ("Диагностические команды: !help, !ping. Очист
         "После подключения auto восстанавливается только при успешной проверке архива; "
         "при неполном архиве подтвердите auto явно. "
         "Погода: !weather [город], !weather tomorrow [город]; свой город: !weather city <город>. "
+        "Рассылка: !weather notify утром [08:00] днём [13:00] вечером [18:00]; выключить: !weather notify off. "
+        "Время по городу, рассылка приходит и в manual. Владельцу: !admin weather <bare_jid> [те же периоды|off]. "
         "Новости: !news [источник]. Эти команды работают и в manual, если включены владельцем. "
         "!echo <текст> доступен только владельцу при echo_enabled=true.")
 
@@ -62,6 +64,13 @@ class Commands:
         if words == ["!admin", "status"]:
             return self.status()
         try:
+            if len(words) >= 3 and words[1] == 'weather':
+                target = bare_jid(words[2], allow_resource=False)
+                if target not in self.config.allowed:
+                    raise ConfigError('Диалог вне списка разрешённых аккаунтов.')
+                if not self.facts or not self.facts.alerts:
+                    return 'Настройка рассылки доступна в запущенном сервисе.'
+                return await self.facts.alerts.configure(target, words[3:])
             if words[1:2] == ['usage']:
                 args, target, period = words[2:], None, 'today'
                 if len(args) > 2:

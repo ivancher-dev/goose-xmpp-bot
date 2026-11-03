@@ -434,7 +434,7 @@ async def test_schema_six_upgrade_preserves_explicit_manual_usage_and_identity(c
     assert await reopened.due_takeovers(time.time()+1000, 60) == []
     assert await reopened.call(lambda c: c.execute('SELECT total_tokens FROM api_usage').fetchone()[0]) == 12
     assert await reopened.call(lambda c: c.execute("SELECT value FROM omemo WHERE key='fixture'").fetchone()[0]) == '{}'
-    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 7
+    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 8
 
 
 @pytest.mark.parametrize('text', ['{}','{"certain":false,"unanswered":[1]}',

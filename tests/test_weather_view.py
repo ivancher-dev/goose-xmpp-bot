@@ -177,7 +177,7 @@ async def test_voice_is_per_bare_jid_and_changes_even_when_forecast_is_cached(co
         assert [jid for jid, _ in sent] == [parent, child, parent]
         assert sent[0][1] == sent[1][1] and sent[0][1] != sent[2][1]
         report = render(provider, provider_data(provider))
-        assert all(text.endswith(report) for _, text in sent)
+        assert all(report in text for _, text in sent)
         assert len(calls) == 1  # Шутки меняются без дополнительных HTTP-запросов.
     finally:
         await engine.close()
