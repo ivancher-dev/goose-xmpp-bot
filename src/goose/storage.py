@@ -14,6 +14,7 @@ from omemo.storage import Just, Nothing, Storage
 from .config import ConfigError, TransientError, profile_value
 from .language import DEFAULTS, preference_value
 from .usage import MAX_ROWS, OUTCOMES, RETENTION_DAYS
+from .takeover import MAX_QUESTION_AGE, MAX_QUESTIONS
 
 
 @contextmanager
@@ -58,7 +59,7 @@ class Database:
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -111,7 +112,13 @@ class Database:
             for jid, fields in profiles.items():
                 db.execute("INSERT OR IGNORE INTO profiles VALUES (?, ?, ?, ?, ?)",
                            (jid, fields["grade"], fields["academic_year"], fields["schedule_class_id"], fields["explanation_style"]))
-            db.execute("PRAGMA user_version=6")
+            db.execute('''CREATE TABLE IF NOT EXISTS takeover_pauses (
+                jid TEXT PRIMARY KEY, last_manual REAL NOT NULL,
+                questions TEXT NOT NULL, readable INTEGER NOT NULL CHECK(readable IN (0,1)))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS takeover_answers (
+                jid TEXT NOT NULL, question_turn INTEGER NOT NULL, answer_turn INTEGER NOT NULL,
+                PRIMARY KEY(jid,question_turn))''')
+            db.execute("PRAGMA user_version=7")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
@@ -237,6 +244,7 @@ class Database:
             db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
             db.execute("UPDATE dialogues SET mode=?, suspended=0, revision=revision+1, mode_changed_at=? WHERE jid=?",
                        (mode, time.time(), jid))
+            db.execute('DELETE FROM takeover_pauses WHERE jid=?', (jid,))
             if mode == 'auto':
                 db.execute('UPDATE archive_cursors SET confirmed=1 WHERE jid=?', (jid,))
         await self.call(update)
@@ -244,13 +252,14 @@ class Database:
     async def suspend_auto(self):
         # До завершения MAM-синхронизации старый auto не разрешает отправку.
         await self.call(lambda db: db.execute(
-            "UPDATE dialogues SET suspended=1, revision=revision+1 WHERE mode='auto'"))
+            "UPDATE dialogues SET suspended=1, revision=revision+1 WHERE mode='auto' OR jid IN (SELECT jid FROM takeover_pauses)"))
 
     async def clear_context(self, jid):
         def clear(db):
             db.execute("INSERT OR IGNORE INTO dialogues(jid) VALUES (?)", (jid,))
             db.execute("UPDATE dialogues SET revision=revision+1, cleared_at=? WHERE jid=?", (time.time(), jid))
             db.execute("DELETE FROM history WHERE jid=?", (jid,))
+            db.execute('DELETE FROM takeover_answers WHERE jid=?', (jid,))
         await self.call(clear)
 
     async def add_user_message(self, jid, body):
@@ -269,6 +278,16 @@ class Database:
         await self.call(lambda db: db.execute(
             "INSERT INTO history VALUES (?, ?, 'assistant', ?, ?)", (jid, turn, body, time.time())))
 
+    async def add_followup_message(self, jid, questions, body):
+        def insert(db):
+            # Продолжение идёт ПОСЛЕ ручных реплик, отдельно от старой пары вопрос/ответ.
+            db.execute('UPDATE dialogues SET next_turn=next_turn+1 WHERE jid=?', (jid,))
+            turn = db.execute('SELECT next_turn FROM dialogues WHERE jid=?', (jid,)).fetchone()[0]
+            db.execute("INSERT INTO history VALUES (?,?,'assistant',?,?)", (jid, turn, body, time.time()))
+            db.executemany('INSERT INTO takeover_answers VALUES(?,?,?)',
+                           [(jid, question, turn) for question, _ in questions])
+        await self.call(insert)
+
     async def history(self, jid, turn, limit, retention_days):
         cutoff = time.time() - retention_days * 86400
         rows = await self.call(lambda db: db.execute(
@@ -280,7 +299,13 @@ class Database:
 
     async def expire_history(self, retention_days):
         cutoff = time.time() - retention_days * 86400
-        await self.call(lambda db: db.execute("DELETE FROM history WHERE created<=?", (cutoff,)))
+        def expire(db):
+            db.execute("DELETE FROM history WHERE created<=?", (cutoff,))
+            db.execute('''DELETE FROM takeover_answers WHERE NOT EXISTS(SELECT 1 FROM history h
+                WHERE h.jid=takeover_answers.jid AND h.turn=takeover_answers.question_turn AND h.role='user')
+                OR NOT EXISTS(SELECT 1 FROM history h WHERE h.jid=takeover_answers.jid
+                    AND h.turn=takeover_answers.answer_turn AND h.role='assistant')''')
+        await self.call(expire)
 
     async def event_kind(self, keys):
         def read(db):
@@ -296,7 +321,8 @@ class Database:
         return await self.call(lambda db: db.execute(
             'SELECT 1 FROM seen WHERE key=? AND expires>?', (key, time.time())).fetchone() is not None)
 
-    async def remember_event(self, jid, keys, kind, *, body=None, stamp=None, live=False):
+    async def remember_event(self, jid, keys, kind, *, body=None, stamp=None, live=False,
+                             takeover_timeout=0, questions=()):
         if kind not in {'incoming', 'manual', 'bot', 'ignored'} or not keys:
             raise ValueError('Invalid event')
         stamp = time.time() if stamp is None else stamp
@@ -314,8 +340,19 @@ class Database:
             db.execute('INSERT OR IGNORE INTO dialogues(jid) VALUES (?)', (jid,))
             row = db.execute('SELECT * FROM dialogues WHERE jid=?', (jid,)).fetchone()
             if kind == 'manual' and (live or stamp >= row['mode_changed_at']):
-                db.execute("""UPDATE dialogues SET mode='manual', suspended=0,
-                    revision=revision+1, mode_changed_at=? WHERE jid=?""", (stamp, jid))
+                pause = db.execute('SELECT * FROM takeover_pauses WHERE jid=?', (jid,)).fetchone()
+                timed = bool(takeover_timeout and (row['mode'] == 'auto' or pause))
+                if timed:
+                    old = json.loads(pause['questions']) if pause else []
+                    candidates = list(dict.fromkeys([*old, *questions]))[-MAX_QUESTIONS:]
+                    db.execute('''INSERT OR REPLACE INTO takeover_pauses VALUES(?,?,?,?)''',
+                        (jid, max(stamp, pause['last_manual']) if pause else stamp,
+                         json.dumps(candidates), int(bool(body) and (pause is None or pause['readable']))))
+                elif not takeover_timeout:
+                    db.execute('DELETE FROM takeover_pauses WHERE jid=?', (jid,))
+                db.execute("""UPDATE dialogues SET mode='manual', suspended=CASE WHEN ? THEN suspended ELSE 0 END,
+                    revision=revision+1, mode_changed_at=? WHERE jid=?""",
+                           (timed, max(stamp, row['mode_changed_at']), jid))
             if body and (live or stamp > row['cleared_at']):
                 db.execute('UPDATE dialogues SET next_turn=next_turn+1 WHERE jid=?', (jid,))
                 turn = db.execute('SELECT next_turn FROM dialogues WHERE jid=?', (jid,)).fetchone()[0]
@@ -347,14 +384,60 @@ class Database:
         def invalidate(db):
             if not transient:
                 db.execute('UPDATE archive_cursors SET confirmed=0 WHERE jid=?', (jid,))
-            db.execute("UPDATE dialogues SET suspended=1, revision=revision+1 WHERE jid=? AND mode='auto'", (jid,))
+            db.execute("UPDATE dialogues SET suspended=1, revision=revision+1 WHERE jid=? AND (mode='auto' OR jid IN (SELECT jid FROM takeover_pauses))", (jid,))
         await self.call(invalidate)
 
     async def resume_auto(self, jid, revision):
         return await self.call(lambda db: bool(db.execute('''UPDATE dialogues SET suspended=0, revision=revision+1
-            WHERE jid=? AND mode='auto' AND suspended=1 AND revision=?
+            WHERE jid=? AND suspended=1 AND ((mode='auto' AND revision=?)
+                OR (mode='manual' AND jid IN (SELECT jid FROM takeover_pauses)))
               AND EXISTS (SELECT 1 FROM archive_cursors WHERE jid=? AND confirmed=1)''',
             (jid, revision, jid)).rowcount))
+
+    async def add_takeover_question(self, jid, turn):
+        def append(db):
+            row = db.execute('SELECT questions FROM takeover_pauses WHERE jid=?', (jid,)).fetchone()
+            if row:
+                values = list(dict.fromkeys([*json.loads(row[0]), turn]))[-MAX_QUESTIONS:]
+                db.execute('UPDATE takeover_pauses SET questions=? WHERE jid=?', (json.dumps(values), jid))
+        await self.call(append)
+
+    async def due_takeovers(self, now, timeout):
+        return await self.call(lambda db: [r[0] for r in db.execute(
+            'SELECT jid FROM takeover_pauses WHERE last_manual<=?', (now - timeout,))])
+
+    async def finish_takeover(self, jid, revision, now, timeout):
+        def finish(db):
+            row = db.execute('''SELECT p.*,d.next_turn FROM takeover_pauses p JOIN dialogues d USING(jid)
+                WHERE jid=? AND d.mode='manual' AND d.suspended=0 AND d.revision=? AND p.last_manual<=?
+                AND EXISTS(SELECT 1 FROM archive_cursors WHERE jid=? AND confirmed=1)''',
+                (jid, revision, now - timeout, jid)).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE dialogues SET mode='auto',revision=revision+1,mode_changed_at=? WHERE jid=?", (now, jid))
+            db.execute('DELETE FROM takeover_pauses WHERE jid=?', (jid,))
+            return {**dict(row), 'revision': revision + 1, 'questions': json.loads(row['questions'])}
+        return await self.call(finish)
+
+    async def takeover_history(self, jid, turns, upto, now):
+        def read(db):
+            candidates = {}
+            for turn in turns:
+                row = db.execute('''SELECT body FROM history h WHERE jid=? AND turn=? AND role='user'
+                    AND created>? AND NOT EXISTS(SELECT 1 FROM history a
+                        WHERE a.jid=h.jid AND a.turn=h.turn AND a.role='assistant')
+                    AND NOT EXISTS(SELECT 1 FROM takeover_answers a
+                        WHERE a.jid=h.jid AND a.question_turn=h.turn)''',
+                    (jid, turn, now - MAX_QUESTION_AGE)).fetchone()
+                if row:
+                    candidates[turn] = row[0]
+            if not candidates:
+                return [], {}
+            rows = db.execute('''SELECT turn,role,body FROM history WHERE jid=? AND turn>=? AND turn<=?
+                                 ORDER BY created,turn,role DESC LIMIT 101''', (jid, min(candidates), upto)).fetchall()
+            # Не отбрасываем объяснения человека ради бюджета: при переполнении молчим.
+            return ([dict(r) for r in rows], candidates) if len(rows) <= 100 else ([], {})
+        return await self.call(read)
 
 
 class OmemoStorage(Storage):

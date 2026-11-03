@@ -56,7 +56,7 @@ def doctor(config):
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
             schema = db.execute("PRAGMA user_version").fetchone()[0]
-            if schema not in (1, 2, 3, 4, 5, 6):
+            if schema not in (1, 2, 3, 4, 5, 6, 7):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
@@ -70,7 +70,12 @@ def doctor(config):
     print('Языковые комментарии: настройки отдельно по собеседникам, по умолчанию выключены.')
     print('Учёт API: автоматические запросы по собеседникам; новых дневных лимитов нет. ' +
           ('Тариф для оценки задан.' if config.usage.input_per_million is not None else 'Тариф для оценки не задан.'))
-    print("Ручная отправка включает manual; временный сбой архива ставит auto на паузу до повтора. "
+    print('Возврат после ручного перехвата: ' +
+          (f'{config.interaction.takeover_timeout_seconds} с без сообщений владельца.'
+           if config.interaction.takeover_timeout_seconds else 'отключён.') +
+          ' Проверка неотвеченных вопросов: ' +
+          ('включена.' if config.interaction.takeover_review_enabled else 'отключена.'))
+    print("Явный manual сохраняется; временный сбой архива ставит auto на паузу до повтора. "
           "Утраченная позиция требует подтверждения владельца.")
     print("Погода: " + ("включена" if config.weather.enabled else "отключена") +
           "; новости: " + ("включены" if config.news.enabled else "отключены") +

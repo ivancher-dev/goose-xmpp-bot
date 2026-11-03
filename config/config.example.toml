@@ -28,6 +28,11 @@ echo_enabled = false
 [interaction]
 typing_enabled = false
 reactions_enabled = false
+# Временный перехват из auto: минута без новых ручных сообщений Гуся.
+# 0 выключает возврат. Явный !admin mode ... manual всегда постоянный.
+# takeover_timeout_seconds = 60
+# Оценка недавних неотвеченных вопросов — отдельный учитываемый API-запрос.
+# takeover_review_enabled = true
 
 [llm]
 enabled = false

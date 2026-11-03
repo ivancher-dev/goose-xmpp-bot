@@ -104,6 +104,8 @@ class MemoryConfig:
 class InteractionConfig:
     typing_enabled: bool = False
     reactions_enabled: bool = False
+    takeover_timeout_seconds: int = 60
+    takeover_review_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -339,9 +341,14 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     news_config = NewsConfig(enabled_news, tuple(parsed_sources),
                              limited(news, "limit", 5, 10),
                              limited(news, "max_age_hours", 48, 168))
-    interaction = table(data, 'interaction', {'typing_enabled', 'reactions_enabled'})
+    interaction = table(data, 'interaction', {'typing_enabled', 'reactions_enabled',
+                                              'takeover_timeout_seconds', 'takeover_review_enabled'})
+    takeover_timeout = typed(interaction, 'takeover_timeout_seconds', int, 60)
+    if takeover_timeout != 0 and not 5 <= takeover_timeout <= 3600:
+        raise ConfigError('interaction.takeover_timeout_seconds: 0 либо от 5 до 3600 секунд.')
     interaction_config = InteractionConfig(typed(interaction, 'typing_enabled', bool, False),
-                                           typed(interaction, 'reactions_enabled', bool, False))
+                                           typed(interaction, 'reactions_enabled', bool, False),
+                                           takeover_timeout, typed(interaction, 'takeover_review_enabled', bool, True))
     usage = table(data, 'usage', {'price_model', 'currency', 'input_per_million', 'output_per_million'})
     price_model = typed(usage, 'price_model', str, '')
     currency = text(usage, 'currency', 'RUB')
