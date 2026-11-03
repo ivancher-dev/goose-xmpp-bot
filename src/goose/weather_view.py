@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from random import Random
+from zoneinfo import ZoneInfo
 
 
 INTRODUCTIONS = (
@@ -85,6 +86,38 @@ class Forecast:
     precipitation: str
     wind_ms: float | None = None
     condition_minutes: int | None = None
+    rain_expected: bool = False
+
+
+@dataclass(frozen=True)
+class WeatherReport:
+    place: str
+    day: str
+    zone: ZoneInfo
+    forecast: Forecast
+    source: str
+    source_url: str
+    tomorrow: bool = False
+    observation: Observation | None = None
+
+    def render(self, *, advice=False):
+        report = render_weather(self.place, self.day, self.zone, self.forecast,
+                                source=self.source, source_url=self.source_url,
+                                tomorrow=self.tomorrow, observation=self.observation)
+        tips = weather_advice(self.forecast) if advice else []
+        return report + ("\n\n" + " ".join(tips) if tips else "")
+
+
+def weather_advice(forecast):
+    """Советы для суток прогноза; вероятность снега не превращается в дождь."""
+    tips = []
+    if forecast.rain_expected:
+        tips.append("Возможен дождь — захвати зонт.")
+    if forecast.minimum < 8 and forecast.wind_ms is not None and forecast.wind_ms >= 5:
+        tips.append("В прохладное и ветреное время оденься потеплее и возьми шапку.")
+    elif forecast.minimum < 12:
+        tips.append("В прохладное время оденься потеплее.")
+    return tips
 
 
 def decimal(value, *, signed=False):

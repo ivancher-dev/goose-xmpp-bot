@@ -21,6 +21,7 @@ from .config import ConfigError, TransientError, bare_jid
 from .dialogue import Dialogues
 from .facts import Facts
 from .facts import intent as facts_intent
+from .weather_alerts import WeatherAlerts
 from .events import SID, message_keys, ordinary_message, owner_stanza, social_only
 from .model import OpenAICompatible
 from .omemo import LEGACY_NS, ManualTrustRequired, register
@@ -128,6 +129,7 @@ class GooseClient(ClientXMPP):
         self.manager = None
         self.dialogues = None
         self.facts = None
+        self.weather_alerts = None
         self.start_task = None
         self.archive = None
         self.own_device_id = None
@@ -241,6 +243,11 @@ class GooseClient(ClientXMPP):
                     self.commands.dialogues = self.dialogues
                     self.facts = Facts(self.config, self.database, self.prepare_reply)
                     self.commands.facts = self.facts
+                    self.weather_alerts = WeatherAlerts(
+                        self.config, self.database, self.facts,
+                        lambda jid, reply: self.prepare_reply(jid, reply, scheduled_weather=True),
+                        ready=lambda: self.ready.is_set())
+                    self.facts.alerts = self.weather_alerts
                     for jid, count in self.holds.items():
                         for _ in range(count):
                             self.dialogues.hold(jid)
@@ -253,6 +260,8 @@ class GooseClient(ClientXMPP):
                     self.worker = asyncio.create_task(self.process_queue())
                     self.archive.start()
             self.ready.set()
+            if self.weather_alerts:
+                self.weather_alerts.start()
             if self.serving_commands:
                 notify_ready()
             log.info("xmpp_ready carbons=%s mam=%s", *self.features.values())
@@ -503,7 +512,7 @@ class GooseClient(ClientXMPP):
         elif self.dialogues:
             await self.dialogues.restore(sender, keys, 'incoming', body, stamp)
 
-    async def prepare_reply(self, sender, reply):
+    async def prepare_reply(self, sender, reply, *, scheduled_weather=False):
         guard = self.dialogues.states[sender].guard if self.dialogues else None
         plugin = self.plugin["xep_0384"]
         outgoing = self.make_message(mto=sender, mtype="chat", mbody=reply)
@@ -529,7 +538,7 @@ class GooseClient(ClientXMPP):
         self.remember_own_keys(keys)
         def send():
             if (not self.ready.is_set() or self.holds.get(sender)
-                    or (self.dialogues and self.dialogues.states[sender].guard != guard)):
+                    or (not scheduled_weather and self.dialogues and self.dialogues.states[sender].guard != guard)):
                 return False
             encrypted.send()
             log.info("reply_queued")
@@ -548,6 +557,8 @@ class GooseClient(ClientXMPP):
                     await task
         if self.archive:
             await self.archive.close()
+        if self.weather_alerts:
+            await self.weather_alerts.close()
         if self.dialogues:
             await self.dialogues.close()
         if self.facts:

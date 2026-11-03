@@ -567,7 +567,7 @@ async def test_migration_four_to_current_preserves_data_and_failure_rolls_back(c
     before = await database.call(lambda c: list(c.execute('SELECT key,value FROM omemo')))
     reopened = Database(config.data_dir, config.jid)
     await reopened.initialize(config.users)
-    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 7
+    assert await reopened.call(lambda c: c.execute('PRAGMA user_version').fetchone()[0]) == 8
     assert (await reopened.profile(CHILD))['grade'] == 3
     assert (await reopened.dialogue(CHILD))['mode'] == 'auto'
     assert (await reopened.history(CHILD, 100, 24, 30))[0]['content'] == 'Синтетическая память'

@@ -56,8 +56,11 @@ retention_days = 30
 
 [weather]
 enabled = false
-provider = "open_meteo" # или "wttr" при недоступности сервера прогноза Open-Meteo
+provider = "open_meteo" # первый источник; можно выбрать "wttr"
+# Без этого поля второй сервис используется как резервный автоматически.
+# fallback_providers = ["wttr"] # для provider="open_meteo"; [] выключает резерв
 # Свой город задаётся в чате командой !weather city <название>.
+# Рассылка: !weather notify утром днём вечером; 08:00 / 13:00 / 18:00 по городу.
 
 [news]
 enabled = false

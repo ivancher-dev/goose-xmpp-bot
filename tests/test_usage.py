@@ -286,7 +286,7 @@ async def test_schema_five_to_current_preserves_old_rows_and_failure_rolls_back(
     await reopened.initialize(config.users)
     after = await database.call(lambda db: {name: [tuple(r) for r in db.execute('SELECT * FROM '+name)] for name in before})
     assert after == before and not await rows(database)
-    assert await database.call(lambda db: db.execute('PRAGMA user_version').fetchone()[0]) == 7
+    assert await database.call(lambda db: db.execute('PRAGMA user_version').fetchone()[0]) == 8
     await database.call(lambda db: db.execute('DROP TABLE api_usage'))
     await database.call(lambda db: db.execute('PRAGMA user_version=5'))
     await database.call(lambda db: db.execute("CREATE TRIGGER fail_usage_migration BEFORE INSERT ON profiles BEGIN SELECT RAISE(ABORT,'fixture'); END"))

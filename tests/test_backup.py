@@ -66,7 +66,7 @@ async def test_create_while_app_data_lock_is_held_preserves_everything_and_is_pr
     with data_lock(database.path.parent):
         snapshot = instance.create()
     manifest = instance.verify(snapshot)
-    assert manifest['schema'] == 7 and manifest['kind'] == 'scheduled'
+    assert manifest['schema'] == 8 and manifest['kind'] == 'scheduled'
     assert logical_rows(snapshot / 'data') == before == logical_rows(database.path.parent)
     for key in ('config', 'env', 'persona', 'unit'):
         assert (snapshot / key).read_bytes() == instance.paths[key].read_bytes()
@@ -226,7 +226,7 @@ async def test_legacy_update_copy_can_be_verified_and_restored_without_touching_
     instance, database = installation
     before = logical_rows(database.path.parent)
     snapshot = m.backup(instance.paths, 'a' * 40)
-    assert instance.verify(snapshot)['schema'] == 7
+    assert instance.verify(snapshot)['schema'] == 8
     assert instance.restore_test(snapshot)['omemo_preserved']
     assert logical_rows(database.path.parent) == before
 
@@ -295,7 +295,7 @@ async def test_restore_check_rejects_network_even_if_future_doctor_attempts_it(i
     instance.run = runner
     with pytest.raises(b.BackupError, match='Пробное восстановление'):
         instance.restore_test(snapshot)
-    assert instance.verify(snapshot)['schema'] == 7
+    assert instance.verify(snapshot)['schema'] == 8
 
 
 async def test_real_identity_trust_and_next_message_survive_cold_restore(installation, tmp_path):

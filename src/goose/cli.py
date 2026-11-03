@@ -56,7 +56,7 @@ def doctor(config):
             if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise ConfigError("Проверка целостности SQLite не пройдена.")
             schema = db.execute("PRAGMA user_version").fetchone()[0]
-            if schema not in (1, 2, 3, 4, 5, 6, 7):
+            if schema not in (1, 2, 3, 4, 5, 6, 7, 8):
                 raise ConfigError("Неподдерживаемая версия БД.")
             account = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
             if account is None or account[0] != config.jid:
@@ -82,6 +82,8 @@ def doctor(config):
           ". Локальная проверка не обращается к источникам.")
     if config.weather.enabled:
         print("Источник погоды: " + config.weather.provider)
+        print("Пул погоды: " + ' → '.join(config.weather.providers) +
+              '. Рассылка включается командами; время по городу, работает и в manual.')
     if config.llm.enabled:
         read_persona(config.llm.persona_file)
         print("Образ Гуся: файл корректен; ключ API: " +

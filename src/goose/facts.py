@@ -20,16 +20,19 @@ import httpx
 
 from .config import bare_jid
 from . import __version__
-from .weather_view import Forecast, Observation, WWO_CONDITIONS, WeatherVoice, render_weather
+from .weather_view import Forecast, Observation, WWO_CONDITIONS, WeatherVoice, WeatherReport
 
 log = logging.getLogger("goose")
 GEO = "https://geocoding-api.open-meteo.com/v1/"
 FORECAST = "https://api.open-meteo.com/v1/forecast"
 WTTR = "https://wttr.in/"
 MAX_BYTES = 524288
+WEATHER_SOURCE_TIMEOUT = 6
+WEATHER_TOTAL_TIMEOUT = 16
 WEATHER_HELP = ("Погода: !weather [город], !weather tomorrow [город]. "
                 "Свой город: !weather city <название> или #ID; просмотр: !weather city; "
-                "удаление: !weather city clear. Можно написать: погода в Нью-Йорке.")
+                "удаление: !weather city clear. Рассылка: !weather notify утром [08:00] вечером [18:00]; "
+                "отключение: !weather notify off. Можно написать: погода в Нью-Йорке.")
 
 
 class FactsError(Exception):
@@ -157,6 +160,10 @@ def condition(code):
 
 
 def weather_text(data, place, tomorrow, now):
+    return weather_report(data, place, tomorrow, now).render()
+
+
+def weather_report(data, place, tomorrow, now):
     zone = ZoneInfo(data["timezone"])
     local = now.astimezone(zone)
     daily, units = data["daily"], data["daily_units"]
@@ -188,9 +195,10 @@ def weather_text(data, place, tomorrow, now):
         feels = number(current["apparent_temperature"], -120, 90)
         wind = number(current["wind_speed_10m"], 0, 500)
         observation = Observation(stamp, condition(current["weather_code"]), temp, feels, wind / 3.6)
-    forecast = Forecast(summary, minimum, maximum, rain, "осадков", forecast_wind)
-    return render_weather(place_name(place), day, zone, forecast, source="Open-Meteo",
-                          source_url="https://open-meteo.com/", tomorrow=tomorrow, observation=observation)
+    rain_expected = daily["weather_code"][idx] in {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}
+    forecast = Forecast(summary, minimum, maximum, rain, "осадков", forecast_wind, rain_expected=rain_expected)
+    return WeatherReport(place_name(place), day, zone, forecast, "Open-Meteo",
+                         "https://open-meteo.com/", tomorrow, observation)
 
 
 def wttr_number(value, low, high):
@@ -250,6 +258,10 @@ def wttr_condition(entry):
 
 
 def wttr_weather_text(data, place, tomorrow, now):
+    return wttr_weather_report(data, place, tomorrow, now).render()
+
+
+def wttr_weather_report(data, place, tomorrow, now):
     zone = ZoneInfo(place["timezone"])
     area = data["nearest_area"][0]
     lat = math.radians(wttr_number(area["latitude"], -90, 90))
@@ -285,9 +297,9 @@ def wttr_weather_text(data, place, tomorrow, now):
         feels = wttr_number(current["FeelsLikeC"], -120, 90)
         wind = wttr_number(current["windspeedKmph"], 0, 500)
         observation = Observation(stamp, wttr_condition(current), temp, feels, wind / 3.6, dated)
-    forecast = Forecast(wttr_condition(representative), minimum, maximum, rain, "дождя", forecast_wind, minutes)
-    return render_weather(place_name(place), day, zone, forecast, source="wttr.in",
-                          source_url="https://wttr.in/", tomorrow=tomorrow, observation=observation)
+    forecast = Forecast(wttr_condition(representative), minimum, maximum, rain, "дождя", forecast_wind, minutes,
+                        rain_expected=rain >= 50)
+    return WeatherReport(place_name(place), day, zone, forecast, "wttr.in", "https://wttr.in/", tomorrow, observation)
 
 
 @dataclass
@@ -310,6 +322,8 @@ class Facts:
         self.cache = OrderedDict()
         self.attempts = deque()
         self.closing = False
+        self.weather_failures = {}
+        self.alerts = None
 
     def submit(self, jid, body):
         request = intent(body)
@@ -444,9 +458,13 @@ class Facts:
             return await self.news(arg)
         if not self.config.weather.enabled:
             return "Погода отключена владельцем в настройках."
+        if arg.split()[:1] in (["notify"], ["рассылка"]):
+            if self.alerts is None:
+                return "Настройка рассылки доступна в запущенном сервисе."
+            return await self.alerts.configure(jid, arg.split()[1:], valid=valid)
         if arg == "city" or arg == "city clear":
             if arg.endswith(" clear"):
-                await self.database.set_weather_location(jid, None)
+                await self.database.set_weather_location(jid, None, stamp=self.now().timestamp())
                 return "Свой город удалён."
             place = await self.database.weather_location(jid)
             return "Свой город: " + place_name(location(place)) if place else "Свой город ещё не задан. " + WEATHER_HELP
@@ -454,7 +472,7 @@ class Facts:
             place = await self.geocode(arg[5:].strip())
             if not valid():
                 return ""
-            await self.database.set_weather_location(jid, place)
+            await self.database.set_weather_location(jid, place, stamp=self.now().timestamp())
             return "Свой город сохранён: " + place_name(place) + ".\nПоиск: Open-Meteo / GeoNames — https://open-meteo.com/"
         tomorrow = bool(re.search(r"(?:^|\s)(?:tomorrow|завтра)(?:\s|$)", arg, re.I))
         query = re.sub(r"(?:^|\s)(?:tomorrow|завтра|сегодня)(?=\s|$)", " ", arg, flags=re.I).strip()
@@ -462,22 +480,51 @@ class Facts:
         if place is None:
             return "Сначала задай свой город. " + WEATHER_HELP
         place = location(place)
-        if self.config.weather.provider == "wttr":
+        report = await self.get_weather(place, tomorrow)
+        return self.states[jid].weather_voice.decorate(report.render(advice=True))
+
+    async def get_weather(self, place, tomorrow=False):
+        """Ограниченный пул независимых источников; ошибка не становится погодой."""
+        errors = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, OverflowError, TimeoutError)
+        providers = self.config.weather.providers
+        # Недавний отказ меняет приоритет, но не лишает последнего шанса:
+        # если здоровый источник тоже упал, пробуем весь оставшийся пул.
+        available = sorted(providers, key=lambda p: self.weather_failures.get(p, 0) > self.clock())
+        try:
+            async with asyncio.timeout(WEATHER_TOTAL_TIMEOUT):
+                for provider in available:
+                    try:
+                        async with asyncio.timeout(WEATHER_SOURCE_TIMEOUT):
+                            report = await self._weather_from(provider, place, tomorrow)
+                        self.weather_failures.pop(provider, None)
+                        return report
+                    except errors:
+                        self.weather_failures[provider] = self.clock() + 120
+                        # Неверный/устаревший JSON не должен оставаться в HTTP-кэше.
+                        host = "wttr.in" if provider == "wttr" else "api.open-meteo.com"
+                        for key in list(self.cache):
+                            if urlsplit(key[0]).hostname == host:
+                                self.cache.pop(key)
+                        log.warning("weather_source_failed provider=%s", provider)
+        except TimeoutError:
+            log.warning("weather_sources_failed reason=deadline")
+        raise FactsError("Не удалось получить свежий прогноз из погодных источников. Попробуй позже.")
+
+    async def _weather_from(self, provider, place, tomorrow):
+        if provider == "wttr":
             if "timezone" not in place:
                 # Совместимость с городами, сохранёнными 0.2.1 без timezone.
                 metadata = await self.geocode(f"#{place['id']}")
-                place["timezone"] = metadata["timezone"]
+                place = {**place, "timezone": metadata["timezone"]}
             endpoint = WTTR + f"{place['latitude']:.6f},{place['longitude']:.6f}"
             payload = await self.fetch(endpoint, {"format": "j1", "lang": "ru"})
-            report = wttr_weather_text(json.loads(payload), place, tomorrow, self.now())
-            return self.states[jid].weather_voice.decorate(report)
+            return wttr_weather_report(json.loads(payload), place, tomorrow, self.now())
         payload = await self.fetch(FORECAST, {
             "latitude": place["latitude"], "longitude": place["longitude"],
             "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
             "forecast_days": 2, "timezone": "auto", "temperature_unit": "celsius", "wind_speed_unit": "kmh"})
-        report = weather_text(json.loads(payload), place, tomorrow, self.now())
-        return self.states[jid].weather_voice.decorate(report)
+        return weather_report(json.loads(payload), place, tomorrow, self.now())
 
     async def news(self, arg):
         config = self.config.news

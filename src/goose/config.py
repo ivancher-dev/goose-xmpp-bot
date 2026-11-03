@@ -120,6 +120,14 @@ class UsageConfig:
 class WeatherConfig:
     enabled: bool = False
     provider: str = "open_meteo"
+    fallback_providers: tuple[str, ...] | None = None
+
+    @property
+    def providers(self):
+        fallback = self.fallback_providers
+        if fallback is None:
+            fallback = ("wttr",) if self.provider == "open_meteo" else ("open_meteo",)
+        return (self.provider, *fallback)
 
 
 @dataclass(frozen=True)
@@ -309,11 +317,17 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     memory_config = MemoryConfig(limited(memory, "recent_messages", 24, 100),
                                  limited(memory, "context_token_budget", 6000, 65536, 256),
                                  limited(memory, "retention_days", 30, 365))
-    weather = table(data, "weather", {"enabled", "provider"})
+    weather = table(data, "weather", {"enabled", "provider", "fallback_providers"})
     weather_provider = text(weather, "provider", "open_meteo")
     if weather_provider not in {"open_meteo", "wttr"}:
         raise ConfigError("weather.provider: допустимы open_meteo и wttr.")
-    weather_config = WeatherConfig(typed(weather, "enabled", bool, False), weather_provider)
+    fallback = weather.get("fallback_providers")
+    if "fallback_providers" in weather:
+        if (not isinstance(fallback, list) or len(fallback) > 1
+                or any(type(p) is not str or p not in {"open_meteo", "wttr"} or p == weather_provider for p in fallback)):
+            raise ConfigError("weather.fallback_providers: список резервных источников open_meteo/wttr без повторов основного.")
+        fallback = tuple(fallback)
+    weather_config = WeatherConfig(typed(weather, "enabled", bool, False), weather_provider, fallback)
     news = table(data, "news", {"enabled", "sources", "limit", "max_age_hours"})
     enabled_news = typed(news, "enabled", bool, False)
     sources = news.get("sources", {})

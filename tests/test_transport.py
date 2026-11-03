@@ -191,6 +191,31 @@ async def test_encrypted_command_and_duplicate(config, database, plugin, monkeyp
     # Сам клиент не подключался к сети; plugin_end требуется только реальному плагину.
 
 
+@pytest.mark.parametrize('scheduled,blocked', [(True, False), (False, True)])
+async def test_scheduled_weather_can_cross_mode_change_but_ordinary_reply_cannot(
+        config, database, plugin, monkeypatch, scheduled, blocked):
+    client = GooseClient(config, 'fixture', database)
+    client.init_plugins()
+    client.ready.set()
+    state = SimpleNamespace(guard=1)
+    client.dialogues = SimpleNamespace(states={'parent@example.org': state})
+    monkeypatch.setitem(client.plugin._plugins, 'xep_0384', plugin)
+    encrypted = message(extra=f'<encrypted xmlns="{LEGACY_NS}"/>')
+    monkeypatch.setattr(encrypted, 'send', Mock())
+    async def encrypt(outgoing, recipients):
+        state.guard += 1  # Явный manual во время шифрования.
+        return encrypted, frozenset()
+    plugin.encrypt_message.side_effect = encrypt
+    send = await client.prepare_reply('parent@example.org', 'Доброе утро!', scheduled_weather=scheduled)
+    assert send() is (not blocked)
+    assert encrypted.send.called is (not blocked)
+    client.ready.clear()
+    assert send() is False
+    client.ready.set()
+    client.holds['parent@example.org'] = 1
+    assert send() is False
+
+
 async def test_pause_command_passes_transport_while_model_is_waiting(config, database, plugin, monkeypatch, tmp_path):
     persona = tmp_path / "persona.md"
     persona.write_text("Учебный Гусь.")

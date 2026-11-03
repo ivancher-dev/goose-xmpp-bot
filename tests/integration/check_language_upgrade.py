@@ -104,7 +104,7 @@ asyncio.run(main())
         assert db.execute('PRAGMA user_version').fetchone()[0] == 4
     run([command, 'create'])
     current = max((lab / 'app-backups/scheduled').glob('daily-*'), key=lambda p: p.name)
-    assert json.loads((current / 'manifest.json').read_text())['schema'] == 7
+    assert json.loads((current / 'manifest.json').read_text())['schema'] == 8
     run([command, 'restore-test', current])
     with closing(sqlite3.connect(current / 'data/goose.sqlite3')) as db:
         assert db.execute('SELECT enabled,mode,max_notes FROM language_feedback WHERE jid=?',

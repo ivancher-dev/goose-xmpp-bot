@@ -101,7 +101,7 @@ async def main():
  assert 'владельцу' in await command.handle('pupil2@example.org','!admin usage')
  assert (await db.dialogue('pupil1@example.org'))['mode']=='manual'
  assert (await db.language_preferences('pupil2@example.org'))['enabled']
- assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==7
+ assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==8
 asyncio.run(main())
 '''
     run([app/'venv/bin/python','-c',probe,config])
@@ -111,13 +111,13 @@ asyncio.run(main())
         assert db.execute('PRAGMA user_version').fetchone()[0]==5
     run([backup,'create'])
     latest=max((lab/'app-backups/scheduled').glob('daily-*'),key=lambda p:p.name)
-    assert json.loads((latest/'manifest.json').read_text())['schema']==7
+    assert json.loads((latest/'manifest.json').read_text())['schema']==8
     with closing(sqlite3.connect(latest/'data/goose.sqlite3')) as db:
         assert db.execute('SELECT prompt_tokens,completion_tokens,total_tokens FROM api_usage').fetchone()==(10,3,13)
     run([backup,'restore-test',latest])
     run([app/'venv/bin/python','-m','pip','check'])
     assert all(p.read_bytes()==value for p,value in kept.items())
-    print('PASS схема 5 → 7; данные/ключи/режимы/таймер сохранены; учёт и права работают; restore схем 5/7 успешен',flush=True)
+    print('PASS схема 5 → 8; данные/ключи/режимы/таймер сохранены; учёт и права работают; restore схем 5/7 успешен',flush=True)
 
 
 if __name__=='__main__':

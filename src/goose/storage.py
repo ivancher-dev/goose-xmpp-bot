@@ -59,7 +59,7 @@ class Database:
     async def initialize(self, profiles):
         def create(db):
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
                 raise ConfigError("Неподдерживаемая версия БД; автоматический откат запрещён.")
             db.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             existing = db.execute("SELECT value FROM metadata WHERE key='account'").fetchone()
@@ -118,7 +118,13 @@ class Database:
             db.execute('''CREATE TABLE IF NOT EXISTS takeover_answers (
                 jid TEXT NOT NULL, question_turn INTEGER NOT NULL, answer_turn INTEGER NOT NULL,
                 PRIMARY KEY(jid,question_turn))''')
-            db.execute("PRAGMA user_version=7")
+            db.execute('''CREATE TABLE IF NOT EXISTS weather_subscriptions (
+                jid TEXT PRIMARY KEY, times TEXT NOT NULL, changed REAL NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS weather_deliveries (
+                jid TEXT NOT NULL, period TEXT NOT NULL, day TEXT NOT NULL, attempted REAL NOT NULL,
+                PRIMARY KEY(jid,period,day))''')
+            db.execute("PRAGMA user_version=8")
         await self.call(create)
         os.chmod(self.path, 0o600)
 
@@ -198,14 +204,45 @@ class Database:
             "SELECT value FROM weather_locations WHERE jid=?", (jid,)).fetchone())
         return json.loads(row[0]) if row else None
 
-    async def set_weather_location(self, jid, value):
-        if value is None:
-            await self.call(lambda db: db.execute("DELETE FROM weather_locations WHERE jid=?", (jid,)))
-        else:
-            payload = json.dumps(value, ensure_ascii=True)
-            await self.call(lambda db: db.execute(
-                "INSERT INTO weather_locations VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET value=excluded.value",
-                (jid, payload)))
+    async def set_weather_location(self, jid, value, *, stamp=None, expected=...):
+        def update(db):
+            if expected is not ...:
+                row = db.execute('SELECT value FROM weather_locations WHERE jid=?', (jid,)).fetchone()
+                if (json.loads(row[0]) if row else None) != expected:
+                    return False
+            if value is None:
+                db.execute("DELETE FROM weather_locations WHERE jid=?", (jid,))
+            else:
+                db.execute("INSERT INTO weather_locations VALUES (?, ?) ON CONFLICT(jid) DO UPDATE SET value=excluded.value",
+                           (jid, json.dumps(value, ensure_ascii=True)))
+            # Меняется и город, и его часовой пояс: старый готовящийся прогноз отменён.
+            db.execute('UPDATE weather_subscriptions SET revision=revision+1,changed=? WHERE jid=?',
+                       (time.time() if stamp is None else stamp, jid))
+            return True
+        return await self.call(update)
+
+    async def weather_subscription(self, jid):
+        row = await self.call(lambda db: db.execute('SELECT * FROM weather_subscriptions WHERE jid=?', (jid,)).fetchone())
+        return {**dict(row), 'times': json.loads(row['times'])} if row else None
+
+    async def set_weather_subscription(self, jid, times, stamp):
+        from .weather_alerts import validate_times
+        validate_times(times)
+        def update(db):
+            db.execute('''INSERT INTO weather_subscriptions VALUES(?,?,?,1)
+                ON CONFLICT(jid) DO UPDATE SET times=excluded.times,changed=excluded.changed,revision=revision+1''',
+                (jid, json.dumps(times), stamp))
+        await self.call(update)
+
+    async def claim_weather_delivery(self, jid, period, day, revision, stamp):
+        def claim(db):
+            row = db.execute('SELECT revision FROM weather_subscriptions WHERE jid=?', (jid,)).fetchone()
+            if row is None or row[0] != revision:
+                return False
+            db.execute('DELETE FROM weather_deliveries WHERE attempted<?', (stamp - 32 * 86400,))
+            return bool(db.execute('INSERT OR IGNORE INTO weather_deliveries VALUES(?,?,?,?)',
+                                   (jid, period, day, stamp)).rowcount)
+        return await self.call(claim)
 
     async def update_profile(self, jid, field, value):
         if field not in {"grade", "academic_year", "schedule_class_id"}:

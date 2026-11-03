@@ -1,4 +1,4 @@
-"""Установленное обновление с выбранного baseline → текущий код/схема 7.
+"""Установленное обновление с выбранного baseline → текущий код/схема 8.
 
 Запуск из чистого коммита. Сеть только для pip с lock/хешами; API подставной,
 XMPP и системный systemd не запускаются. Данные целиком синтетические.
@@ -88,13 +88,16 @@ c=load_config(Path(sys.argv[1]));asyncio.run(Database(c.data_dir,c.jid).initiali
     probe = '''
 import asyncio,json,os,sys,time
 from dataclasses import replace
+from datetime import datetime,timezone
 from pathlib import Path
 import httpx
 from goose.commands import Commands
-from goose.config import load_config
+from goose.config import load_config,WeatherConfig
 from goose.dialogue import Dialogues,estimate_tokens
+from goose.facts import Facts
 from goose.model import OpenAICompatible
 from goose.storage import Database
+from goose.weather_alerts import WeatherAlerts
 async def main():
  c=load_config(Path(sys.argv[1]));db=Database(c.data_dir,c.jid);now=[time.time()];sent=[]
  os.environ['GOOSE_LLM_API_KEY']='fixture-key'
@@ -133,8 +136,34 @@ async def main():
   report=await command.handle('parent@example.org','!admin usage pupil2@example.org month')
   assert 'попыток API: 3' in report and 'всего — 146' in report
   assert (await db.language_preferences('pupil2@example.org'))['enabled']
-  assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==7
+  assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==8
   await engine.restore('pupil2@example.org',('pending-owner',),'manual','Незавершённая пауза',now[0],live=True)
+  weather_now=[datetime(2026,11,3,4,50,tzinfo=timezone.utc)]
+  wc=replace(c,weather=WeatherConfig(True))
+  place={'id':123,'name':'Fixture','country':'','admin1':'','latitude':55.0,'longitude':37.0,'timezone':'Europe/Moscow'}
+  await db.set_weather_location('pupil1@example.org',place)
+  weather_calls=[]
+  def weather_http(request):
+   weather_calls.append(request.url.host)
+   if request.url.host=='api.open-meteo.com': return httpx.Response(503)
+   assert request.url.host=='wttr.in'
+   return httpx.Response(200,json={'nearest_area':[{'latitude':'55','longitude':'37'}],
+    'current_condition':[{'localObsDateTime':'2026-11-03 08:00','temp_C':'4','FeelsLikeC':'2','windspeedKmph':'25','weatherCode':'296'}],
+    'weather':[{'date':'2026-11-03','mintempC':'3','maxtempC':'9','hourly':[
+     {'time':'1200','chanceofrain':'70','windspeedKmph':'25','weatherCode':'296'}]}]})
+  facts=Facts(wc,db,prepare,transport=httpx.MockTransport(weather_http),now=lambda:weather_now[0])
+  alerts=WeatherAlerts(wc,db,facts,prepare,now=lambda:weather_now[0]);facts.alerts=alerts
+  try:
+   command=Commands(wc,db);command.facts=facts
+   assert '08:00' in await command.handle('parent@example.org','!admin weather pupil1@example.org утром')
+   weather_now[0]=datetime(2026,11,3,5,tzinfo=timezone.utc)
+   await alerts.tick();await asyncio.gather(*list(alerts.jobs.values()))
+   assert sent[-1][0]=='pupil1@example.org' and 'Доброе утро!' in sent[-1][1]
+   assert 'зонт' in sent[-1][1] and 'шапку' in sent[-1][1]
+   assert weather_calls==['api.open-meteo.com','wttr.in']
+   await alerts.tick();await asyncio.gather(*list(alerts.jobs.values()))
+   assert len(sent)==2 and (await db.dialogue('pupil1@example.org'))['mode']=='manual'
+  finally: await alerts.close();await facts.close()
  finally: await engine.close()
 asyncio.run(main())
 '''
@@ -145,15 +174,17 @@ asyncio.run(main())
         assert db.execute('PRAGMA user_version').fetchone()[0]==baseline_schema
     run([backup,'create'])
     latest=max((lab/'app-backups/scheduled').glob('daily-*'),key=lambda p:p.name)
-    assert json.loads((latest/'manifest.json').read_text())['schema']==7
+    assert json.loads((latest/'manifest.json').read_text())['schema']==8
     with closing(sqlite3.connect(latest/'data/goose.sqlite3')) as db:
         assert db.execute('SELECT SUM(total_tokens),COUNT(*) FROM api_usage').fetchone()==(146,3)
         assert db.execute('SELECT COUNT(*) FROM takeover_pauses').fetchone()[0]==1
         assert db.execute('SELECT COUNT(*) FROM takeover_answers').fetchone()[0]==1
+        assert db.execute('SELECT COUNT(*) FROM weather_subscriptions').fetchone()[0]==1
+        assert db.execute('SELECT COUNT(*) FROM weather_deliveries').fetchone()[0]==1
     run([backup,'restore-test',latest])
     run([app/'venv/bin/python','-m','pip','check'])
     assert all(p.read_bytes()==value for p,value in kept.items())
-    print(f'PASS схема {baseline_schema} → 7; ключи/настройки/статистика/таймер сохранены; длинный контекст/auto/продолжение работают; restore обеих копий успешен',flush=True)
+    print(f'PASS схема {baseline_schema} → 8; ключи/настройки/статистика/таймер сохранены; длинный контекст/auto/продолжение работают; restore обеих копий успешен',flush=True)
 
 
 if __name__=='__main__':
