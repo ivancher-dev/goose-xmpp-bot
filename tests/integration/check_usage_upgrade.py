@@ -1,4 +1,4 @@
-"""Настоящий updater 0.3.10/схема 5 → текущий код/схема 6 на временной установке.
+"""Настоящий updater 0.3.10/схема 5 → текущий код/схема 7 на временной установке.
 
 Запуск из чистого коммита. Сеть только для pip с lock/хешами; API и XMPP подставные.
 Не требует root или systemd. Не входит в обычный pytest.
@@ -59,7 +59,8 @@ asyncio.run(main())
     kept = {p:p.read_bytes() for p in keep}
     def old_rows():
         with closing(sqlite3.connect(data/'goose.sqlite3')) as db:
-            names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'") if r[0]!='api_usage']
+            names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                     if r[0] not in {'api_usage', 'takeover_pauses', 'takeover_answers'}]
             return {name:list(db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')) for name in names}
     before = old_rows()
     run(['git','-C',repo,'switch','--detach',target])
@@ -100,7 +101,7 @@ async def main():
  assert 'владельцу' in await command.handle('pupil2@example.org','!admin usage')
  assert (await db.dialogue('pupil1@example.org'))['mode']=='manual'
  assert (await db.language_preferences('pupil2@example.org'))['enabled']
- assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==6
+ assert await db.call(lambda s:s.execute('PRAGMA user_version').fetchone()[0])==7
 asyncio.run(main())
 '''
     run([app/'venv/bin/python','-c',probe,config])
@@ -110,13 +111,13 @@ asyncio.run(main())
         assert db.execute('PRAGMA user_version').fetchone()[0]==5
     run([backup,'create'])
     latest=max((lab/'app-backups/scheduled').glob('daily-*'),key=lambda p:p.name)
-    assert json.loads((latest/'manifest.json').read_text())['schema']==6
+    assert json.loads((latest/'manifest.json').read_text())['schema']==7
     with closing(sqlite3.connect(latest/'data/goose.sqlite3')) as db:
         assert db.execute('SELECT prompt_tokens,completion_tokens,total_tokens FROM api_usage').fetchone()==(10,3,13)
     run([backup,'restore-test',latest])
     run([app/'venv/bin/python','-m','pip','check'])
     assert all(p.read_bytes()==value for p,value in kept.items())
-    print('PASS схема 5 → 6; данные/ключи/режимы/таймер сохранены; учёт и права работают; restore схем 5/6 успешен',flush=True)
+    print('PASS схема 5 → 7; данные/ключи/режимы/таймер сохранены; учёт и права работают; restore схем 5/7 успешен',flush=True)
 
 
 if __name__=='__main__':

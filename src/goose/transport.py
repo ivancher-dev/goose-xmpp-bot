@@ -232,7 +232,11 @@ class GooseClient(ClientXMPP):
                     self.own_events = dict.fromkeys(await self.database.owner_event_keys())
                     model = OpenAICompatible(self.config.llm) if self.config.llm.enabled else None
                     self.dialogues = Dialogues(self.config, self.database, model, self.prepare_reply,
-                                               social=self.social)
+                                               social=self.social,
+                                               can_resume=lambda jid: self.ready.is_set()
+                                               and self.features['carbons'] is True
+                                               and self.archive is not None
+                                               and self.archive.states.get(jid) == 'ready')
                     await self.dialogues.initialize()
                     self.commands.dialogues = self.dialogues
                     self.facts = Facts(self.config, self.database, self.prepare_reply)
@@ -269,7 +273,8 @@ class GooseClient(ClientXMPP):
                 f"модель={'включена' if self.config.llm.enabled else 'отключена'}; "
                 f"погода={self.config.weather.enabled}; новости={self.config.news.enabled}; "
                 f"набор={self.config.interaction.typing_enabled}; реакции={self.config.interaction.reactions_enabled}; "
-                "архив не запускает команды; расписание отключено; ручная отправка включает manual.")
+                "архив не запускает команды; расписание отключено; явный manual постоянный; "
+                f"возврат после перехвата: {self.config.interaction.takeover_timeout_seconds} с.")
 
     def archive_message(self, stanza):
         if self.archive:

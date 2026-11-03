@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 import stat
 import time
@@ -12,6 +12,7 @@ from .model import ModelError
 from .language import instructions, opted_out, render_feedback
 from .social import LIKE_RULE, answer_metadata
 from .usage import usage_scope
+from .takeover import FOLLOWUP_RULE, MAX_QUESTION_AGE, review_messages, unanswered
 
 log = logging.getLogger("goose")
 RULES = ("Ты — семейный помощник Гусь, не родитель. Объясняй учебные факты точно. "
@@ -49,6 +50,9 @@ class Job:
     guard: int = 0
     message_id: str | None = None
     typing_target: str | None = None
+    review: bool = False
+    candidates: tuple = ()
+    questions: tuple = ()
 
 
 @dataclass
@@ -59,17 +63,23 @@ class State:
     last_error: float = float("-inf")
     holds: int = 0
     guard: int = 0
+    last_live_question: tuple | None = None
+    reviewing: bool = False
+    manual_deadline: float | None = None
 
 
 class Dialogues:
-    def __init__(self, config, database, model, prepare_reply, *, clock=time.monotonic, social=None):
+    def __init__(self, config, database, model, prepare_reply, *, clock=time.monotonic, social=None,
+                 wall_clock=time.time, can_resume=lambda jid: False):
         self.config, self.database, self.model = config, database, model
         self.prepare_reply, self.clock = prepare_reply, clock
         self.social = social
+        self.wall_clock, self.can_resume = wall_clock, can_resume
         self.states = {jid: State() for jid in config.allowed}
         self.slots = asyncio.Semaphore(config.llm.max_concurrent_requests)
         self.tasks = set()
         self.cleanup = None
+        self.takeover_task = None
         self.closing = False
 
     async def initialize(self):
@@ -80,6 +90,46 @@ class Dialogues:
         await self.database.suspend_auto()
         await self.database.expire_history(self.config.memory.retention_days)
         self.cleanup = asyncio.create_task(self._expire())
+        if self.config.llm.enabled and self.model and self.config.interaction.takeover_timeout_seconds:
+            self.takeover_task = asyncio.create_task(self._return_loop())
+
+    async def _return_loop(self):
+        while True:
+            await asyncio.sleep(1)
+            try:
+                await self.resume_takeovers()
+            except Exception:
+                log.error('takeover_return_failed')
+
+    async def resume_takeovers(self):
+        timeout = self.config.interaction.takeover_timeout_seconds
+        if self.closing or not timeout or not self.config.llm.enabled or not self.model:
+            return
+        now = self.wall_clock()
+        for jid in await self.database.due_takeovers(now, timeout):
+            if jid not in self.states:
+                continue
+            state = self.states[jid]
+            async with state.lock:
+                if (state.holds or not self.can_resume(jid)
+                        or (state.manual_deadline is not None and self.clock() < state.manual_deadline)
+                        or await self.database.profile(jid) is None):
+                    continue
+                row = await self.database.dialogue(jid)
+                pause = await self.database.finish_takeover(jid, row['revision'], now, timeout)
+                if pause is None:
+                    continue
+                self._discard(jid)
+                state.manual_deadline = None
+                log.info('takeover_auto_resumed')
+                count = sum(len(s.pending) for s in self.states.values()) + len(self.tasks)
+                if (not state.holds and self.config.interaction.takeover_review_enabled
+                        and pause['readable'] and pause['questions'] and count < 64):
+                    state.reviewing = True
+                    state.pending.append(Job(pause['next_turn'], pause['revision'],
+                        self.clock() + self.config.llm.timeout_seconds * 4 + 35, state.guard,
+                        review=True, candidates=tuple(pause['questions'])))
+                    self._start_worker(jid, state)
 
     async def _expire(self):
         while True:
@@ -97,6 +147,7 @@ class Dialogues:
 
     def _discard(self, jid):
         state = self.states[jid]
+        state.reviewing = False
         if self.social:
             self.social.stop_typing(jid)
         state.pending.clear()
@@ -113,6 +164,7 @@ class Dialogues:
                 raise ConfigError("Сначала задайте полный профиль пользователя в конфигурации.")
         async with self.states[jid].lock:
             await self.database.set_mode(jid, mode)
+            self.states[jid].manual_deadline = None
             self._discard(jid)
 
     async def mode(self, jid):
@@ -140,10 +192,16 @@ class Dialogues:
         jid = self._target(jid)
         state = self.states[jid]
         async with state.lock:
+            recent = state.last_live_question
+            questions = ((recent[0],) if live and recent and
+                         self.wall_clock() - MAX_QUESTION_AGE <= recent[1] <= self.wall_clock() else ())
             keep_text = self.config.llm.enabled and (live or stamp > time.time() - self.config.memory.retention_days * 86400)
             changed = await self.database.remember_event(
-                jid, keys, kind, body=body if keep_text else None, stamp=stamp, live=live)
+                jid, keys, kind, body=body if keep_text else None, stamp=stamp, live=live,
+                takeover_timeout=self.config.interaction.takeover_timeout_seconds, questions=questions)
             if changed and kind == 'manual' and (await self.database.dialogue(jid))['mode'] == 'manual':
+                if live:
+                    state.manual_deadline = self.clock() + self.config.interaction.takeover_timeout_seconds
                 state.guard += 1
                 self._discard(jid)
             return changed
@@ -194,14 +252,23 @@ class Dialogues:
                 if not await self.database.remember_event(jid, keys, 'incoming', body=body, stamp=stamp, live=True):
                     return
                 turn = (await self.database.dialogue(jid))['next_turn']
+            if state.reviewing:
+                # Только новый вопрос отменяет продолжение; повторная доставка — нет.
+                state.guard += 1
+                self._discard(jid)
+            state.last_live_question = (turn, self.wall_clock())
+            await self.database.add_takeover_question(jid, turn)
             if not active or state.holds:
                 return
             deadline = self.clock() + self.config.llm.timeout_seconds * 2 + 35
             state.pending.append(Job(turn, row["revision"], deadline, state.guard, message_id, typing_target))
-            if state.task is None or state.task.done():
-                state.task = asyncio.create_task(self._work(jid, state))
-                self.tasks.add(state.task)
-                state.task.add_done_callback(self.tasks.discard)
+            self._start_worker(jid, state)
+
+    def _start_worker(self, jid, state):
+        if state.task is None or state.task.done():
+            state.task = asyncio.create_task(self._work(jid, state))
+            self.tasks.add(state.task)
+            state.task.add_done_callback(self.tasks.discard)
 
     async def _valid(self, jid, job):
         state = self.states[jid]
@@ -209,7 +276,29 @@ class Dialogues:
             return False
         row = await self.database.dialogue(jid)
         return (row["mode"] == "auto" and not row["suspended"] and row["revision"] == job.revision
+                and (not job.review or (row['next_turn'] == job.turn and self.can_resume(jid)))
                 and not state.holds and state.guard == job.guard)
+
+    async def _review(self, jid, job):
+        history, candidates = await self.database.takeover_history(
+            jid, job.candidates, job.turn, self.wall_clock())
+        if not candidates:
+            return None
+        messages = review_messages(history, candidates)
+        if estimate_tokens(messages) > self.config.memory.context_token_budget:
+            log.info('takeover_review_skipped reason=context_budget')
+            return None
+        if not await self._valid(jid, job):
+            return None
+        with usage_scope(self.database, jid):
+            result = await self.model.complete(messages)
+        if not await self._valid(jid, job):
+            return None
+        selected = unanswered(result, candidates)
+        if not selected:
+            log.info('takeover_review_skipped reason=no_clear_question')
+            return None
+        return replace(job, questions=tuple((turn, candidates[turn]) for turn in selected))
 
     async def _context(self, jid, job):
         profile = await self.database.profile(jid)
@@ -223,19 +312,25 @@ class Dialogues:
                    f"Стиль объяснения: {profile['explanation_style']}."}]
         history = await self.database.history(jid, job.turn, self.config.memory.recent_messages,
                                               self.config.memory.retention_days)
+        if job.questions:
+            prefix[0]['content'] += '\n\n' + FOLLOWUP_RULE
+            history.append({'role': 'user', 'content': 'Оставшиеся вопросы:\n' +
+                            '\n'.join(body for _, body in job.questions)})
         def framed_history(items):
             # Ручной ответ может быть первым сохранённым событием диалога.
             # Сохраняем его, добавив нейтральное начало для Chat Completions.
             if items and items[0]['role'] == 'assistant':
                 return [{'role': 'user', 'content': 'Сохранённые предыдущие ответы Гуся:'}] + items
             return items
+        if job.review and estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
+            raise ModelError('context_limit')
         while len(history) > 1 and estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
             history.pop(0)
         if not history or estimate_tokens(prefix + framed_history(history)) > self.config.memory.context_token_budget:
             raise ModelError("context_limit")
         body = next((m['content'] for m in reversed(history) if m['role'] == 'user'), '')
         preferences = await self.database.language_preferences(jid)
-        if preferences['enabled'] and not opted_out(body):
+        if preferences['enabled'] and not job.review and not opted_out(body):
             # Общие правила ответа и его формата передаём одним system-блоком.
             enriched = [{**prefix[0], 'content': prefix[0]['content'] + '\n\n' + instructions(preferences, body)},
                         *prefix[1:]]
@@ -272,7 +367,10 @@ class Dialogues:
                 if error:
                     state.last_error = self.clock()
                 else:
-                    await self.database.add_assistant_message(jid, job.turn, text)
+                    if job.review:
+                        await self.database.add_followup_message(jid, job.questions, text)
+                    else:
+                        await self.database.add_assistant_message(jid, job.turn, text)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -294,7 +392,12 @@ class Dialogues:
                         async with self.slots:
                             if not await self._valid(jid, job):
                                 continue
-                            if self.social:
+                            if job.review:
+                                reviewed = await self._review(jid, job)
+                                if reviewed is None:
+                                    continue
+                                job = reviewed
+                            if self.social and not job.review:
                                 self.social.note_question(jid)
                             context, body, preferences = await self._context(jid, job)
                             if not await self._valid(jid, job):
@@ -310,6 +413,8 @@ class Dialogues:
                 except (ModelError, ConfigError, TimeoutError) as exc:
                     code = exc.code if isinstance(exc, ModelError) else "configuration" if isinstance(exc, ConfigError) else "timeout"
                     log.warning("generation_failed reason=%s", code)
+                    if job.review:
+                        continue
                     text = ("Сообщение не помещается в контекст. Попробуй короче или очисти его: !context clear."
                             if code == "context_limit" else "Сейчас не получается подготовить ответ. Попробуй позже.")
                     await self._deliver(jid, state, job, text, error=True)
@@ -324,6 +429,7 @@ class Dialogues:
             async with state.lock:
                 if state.task is asyncio.current_task():
                     state.task = None
+                    state.reviewing = False
 
     async def close(self):
         self.closing = True
@@ -332,9 +438,12 @@ class Dialogues:
                 self.social.stop_typing(jid)
         if self.cleanup:
             self.cleanup.cancel()
+        if self.takeover_task:
+            self.takeover_task.cancel()
         tasks = tuple(self.tasks)
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, *([self.cleanup] if self.cleanup else []), return_exceptions=True)
+        await asyncio.gather(*tasks, *([self.cleanup] if self.cleanup else []),
+                             *([self.takeover_task] if self.takeover_task else []), return_exceptions=True)
         if self.model:
             await self.model.close()

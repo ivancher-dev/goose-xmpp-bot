@@ -275,7 +275,7 @@ async def test_bounded_storage_discloses_partial_coverage(config, database, monk
     assert 'Период покрыт не полностью' in await usage_report(config, database, CHILD, now=STAMP)
 
 
-async def test_schema_five_to_six_preserves_old_rows_and_failure_rolls_back(config, database):
+async def test_schema_five_to_current_preserves_old_rows_and_failure_rolls_back(config, database):
     await database.update_language(CHILD, 'enabled', True)
     await database.add_user_message(CHILD, 'Синтетическая сохранённая история')
     await database.call(lambda db: db.execute('DROP TABLE api_usage'))
@@ -286,7 +286,7 @@ async def test_schema_five_to_six_preserves_old_rows_and_failure_rolls_back(conf
     await reopened.initialize(config.users)
     after = await database.call(lambda db: {name: [tuple(r) for r in db.execute('SELECT * FROM '+name)] for name in before})
     assert after == before and not await rows(database)
-    assert await database.call(lambda db: db.execute('PRAGMA user_version').fetchone()[0]) == 6
+    assert await database.call(lambda db: db.execute('PRAGMA user_version').fetchone()[0]) == 7
     await database.call(lambda db: db.execute('DROP TABLE api_usage'))
     await database.call(lambda db: db.execute('PRAGMA user_version=5'))
     await database.call(lambda db: db.execute("CREATE TRIGGER fail_usage_migration BEFORE INSERT ON profiles BEGIN SELECT RAISE(ABORT,'fixture'); END"))
