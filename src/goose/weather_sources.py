@@ -43,8 +43,24 @@ def label(place):
     return ', '.join(dict.fromkeys(p for p in (place['name'], place.get('admin1'), place.get('country')) if p))
 
 
+def rain_windows(samples, zone, day_end):
+    """Время относится к прогнозным интервалам, не к точному началу дождя."""
+    ranges = []
+    for sample in samples:
+        if not sample['rain']:
+            continue
+        first, last = sample['time'], min(sample['end'], day_end)
+        if ranges and first <= ranges[-1][1]:
+            ranges[-1] = (ranges[-1][0], max(ranges[-1][1], last))
+        else:
+            ranges.append((first, last))
+    def clock(stamp):
+        return '24:00' if stamp == day_end else stamp.astimezone(zone).strftime('%H:%M')
+    return ', '.join(f'{clock(first)}–{clock(last)}' for first, last in ranges) or None
+
+
 def aggregate(samples, place, tomorrow, now):
-    """Минимум/максимум только доступных часов, а не выдуманные целые сутки."""
+    """Сегодня — ещё действующие интервалы; завтра — доступные сутки города."""
     zone = ZoneInfo(place['timezone'])
     day = (now.astimezone(zone) + timedelta(days=int(tomorrow))).date()
     chosen = sorted((s for s in samples if s['time'].astimezone(zone).date() == day), key=lambda s: s['time'])
@@ -53,22 +69,29 @@ def aggregate(samples, place, tomorrow, now):
     start = datetime(day.year, day.month, day.day, tzinfo=zone)
     end = start + timedelta(days=1)
     needed = start if tomorrow else max(start, now)
+    if not tomorrow:
+        chosen = [s for s in chosen if s['end'] > now]
+    if not chosen:
+        raise ValueError('Missing remaining forecast points')
     if chosen[0]['time'] > needed + timedelta(hours=3) or chosen[-1]['time'] < end - timedelta(hours=3):
         raise ValueError('Incomplete forecast period')
     if any((b['time'] - a['time']).total_seconds() > 3 * 3600 for a, b in zip(chosen, chosen[1:])):
         raise ValueError('Forecast gap')
-    representative = min(chosen, key=lambda s: abs((s['time'].astimezone(zone) - (start + timedelta(hours=12))).total_seconds()))
+    reference = max(needed, start + timedelta(hours=12))
+    representative = min(chosen, key=lambda s: abs((s['time'] - reference).total_seconds()))
     temps = [value(s['temp'], -100, 70) for s in chosen]
     winds = [s['wind'] for s in chosen]
     wind = max(value(w, 0, 140) for w in winds) if all(w is not None for w in winds) else None
     probabilities = [s.get('probability') for s in chosen]
     probability = max(value(p, 0, 100) for p in probabilities) if all(p is not None for p in probabilities) else None
     first, last = (chosen[i]['time'].astimezone(zone) for i in (0, -1))
+    period = 'На завтра' if tomorrow else 'На оставшуюся часть дня'
     forecast = Forecast(representative['condition'], min(temps), max(temps), probability,
                         'осадков', wind, representative['time'].astimezone(zone).hour * 60
                         + representative['time'].astimezone(zone).minute,
                         any(s['rain'] for s in chosen),
-                        f'По доступным интервалам {first:%H:%M}–{last:%H:%M}')
+                        f'{period}, по интервалам {first:%H:%M}–{last:%H:%M}',
+                        rain_windows=rain_windows(chosen, zone, end))
     return day.isoformat(), zone, forecast, chosen
 
 
@@ -111,14 +134,16 @@ def met_no_report(data, place, tomorrow, now):
     for entry in entries:
         stamp = instant(entry['time'])
         point = entry['data']['instant']['details']
-        period = next((entry['data'][key] for key in ('next_1_hours', 'next_6_hours', 'next_12_hours') if key in entry['data']), None)
-        if period is None:
+        hours = next((h for h in (1, 6, 12) if f'next_{h}_hours' in entry['data']), None)
+        if hours is None:
             continue
+        period = entry['data'][f'next_{hours}_hours']
         condition, rain = met_condition(period['summary']['symbol_code'])
         probability = period.get('details', {}).get('probability_of_precipitation')
         if probability is not None and units.get('probability_of_precipitation') != '%':
             raise ValueError('Invalid probability unit')
-        samples.append({'time': stamp, 'temp': point['air_temperature'], 'wind': point['wind_speed'],
+        samples.append({'time': stamp, 'end': stamp + timedelta(hours=hours),
+                        'temp': point['air_temperature'], 'wind': point['wind_speed'],
                         'condition': condition, 'rain': rain, 'probability': probability})
     day, zone, forecast, _ = aggregate(samples, place, tomorrow, now)
     return WeatherReport(label(place), day, zone, forecast, 'MET Norway',
@@ -156,7 +181,8 @@ def seven_timer_report(data, place, tomorrow, now):
         speed = entry.get('wind10m', {}).get('speed')
         if speed is not None and (type(speed) is not int or speed not in _WIND_RANGES):
             speed = None
-        samples.append({'time': issued + timedelta(hours=hours), 'temp': entry['temp2m'], 'wind': None,
+        samples.append({'time': issued + timedelta(hours=hours), 'end': issued + timedelta(hours=hours + 3),
+                        'temp': entry['temp2m'], 'wind': None,
                         'condition': _SEVEN_CONDITIONS.get(code, 'описание погоды недоступно'),
                         'rain': entry.get('prec_type') in {'rain', 'frzr', 'icep'}
                                 or code in {'lightrain', 'oshower', 'ishower', 'rain', 'rainsnow', 'tsrain'},
@@ -202,13 +228,15 @@ def yandex_report(data, place, tomorrow, now):
             code = hour['condition']
             if not isinstance(code, str):
                 raise ValueError('Invalid condition')
-            samples.append({'time': instant(hour['time']), 'temp': hour['temperature'], 'wind': hour['windSpeed'],
+            stamp = instant(hour['time'])
+            samples.append({'time': stamp, 'end': stamp + timedelta(hours=1),
+                            'temp': hour['temperature'], 'wind': hour['windSpeed'],
                             'condition': _YA_CONDITIONS.get(code, 'описание погоды недоступно'), 'rain': code in _YA_RAIN})
     day, zone, forecast, _ = aggregate(samples, place, tomorrow, now)
     observation = None
     if not tomorrow:
         current = point['now']
-        observation = Observation(issued, _YA_CONDITIONS.get(current['condition'], 'описание погоды недоступно'),
+        observation = Observation(issued.astimezone(zone), _YA_CONDITIONS.get(current['condition'], 'описание погоды недоступно'),
                                   value(current['temperature'], -100, 70), value(current['feelsLike'], -120, 90),
                                   value(current['windSpeed'], 0, 140))
     return WeatherReport(label(place), day, zone, forecast, 'Яндекс Погода',

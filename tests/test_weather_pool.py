@@ -74,7 +74,7 @@ def test_real_contracts_render_local_dates_source_and_no_invented_probabilities(
     text = report.render(advice=True)
     assert report.day == '2026-11-05' and report.source == source and 'зонт' in text
     assert 'источник не сообщает' in text
-    assert 'По доступным интервалам' in text
+    assert 'На оставшуюся часть дня, по интервалам' in text
     assert ('Прогноз обновлён:' in text) == (source != 'Яндекс Погода')
     assert parser(data(), PLACE, True, NOW).day == '2026-11-06'
     if source == '7Timer! (GFS)':
@@ -108,7 +108,7 @@ def test_met_rejects_wrong_or_incomplete_data(case):
     elif case == 'location': data['geometry']['coordinates'][0] = 20
     elif case == 'gap': del props['timeseries'][3:8]
     elif case == 'duplicate': props['timeseries'].append(deepcopy(props['timeseries'][0]))
-    elif case == 'nan': props['timeseries'][0]['data']['instant']['details']['air_temperature'] = float('nan')
+    elif case == 'nan': props['timeseries'][1]['data']['instant']['details']['air_temperature'] = float('nan')
     else: props['timeseries'] = props['timeseries'][:2]
     with pytest.raises((ValueError, KeyError, TypeError)):
         met_no_report(data, PLACE, False, NOW)
@@ -121,7 +121,7 @@ def test_yandex_and_seven_timer_reject_unsafe_data(case):
     elif case == 'wrong-product': data['product'] = 'astro'
     elif case == 'offset': data['dataseries'][0]['timepoint'] = '3'
     elif case == 'missing-day': data['dataseries'] = data['dataseries'][:2]
-    elif case == 'nan': data['dataseries'][0]['temp2m'] = float('nan')
+    elif case == 'nan': data['dataseries'][1]['temp2m'] = float('nan')
     else:
         data = yandex_data()
         if case == 'graphql': data['errors'] = [{'message': 'private'}]

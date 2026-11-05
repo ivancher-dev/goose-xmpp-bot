@@ -179,6 +179,24 @@ async def main():
    assert [r.url.host for r in pool_calls]==['api.open-meteo.com','api.weather.yandex.ru','wttr.in','api.met.no','www.7timer.info']
    assert all(('X-Yandex-Weather-Key' in r.headers)==(r.url.host=='api.weather.yandex.ru') for r in pool_calls)
   finally: await pool.close()
+  window_now=datetime(2026,11,3,10,46,tzinfo=timezone.utc)
+  window_data={'data':{'serverTime':window_now.isoformat(),'weatherByPoint':{
+   'now':{'temperature':15,'feelsLike':15,'windSpeed':1,'condition':'CLEAR'},
+   'forecast':{'days':[{'hours':[
+    {'time':f'2026-11-03T{h:02}:00:00+03:00','temperature':-15 if h<10 else 15,
+     'windSpeed':10 if h<10 else 1,'condition':'RAIN' if h<10 else 'CLEAR'} for h in range(24)]}]}}}}
+  window=Facts(replace(c,weather=WeatherConfig(True,'yandex',())),db,prepare,
+   transport=httpx.MockTransport(lambda request:httpx.Response(200,json=window_data)),now=lambda:window_now)
+  try:
+   report=await window.get_weather(place)
+   assert report.forecast.minimum==15 and not report.forecast.rain_expected
+   assert 'зонт' not in report.render(advice=True) and 'шапку' not in report.render(advice=True)
+   assert 'По данным на 13:46: ясно.' in report.render() and 'UTC+03:00' in report.render()
+   window_data['data']['weatherByPoint']['forecast']['days'][0]['hours'][18]['condition']='RAIN'
+   report=await window.get_weather(place)
+   assert 'Дождь в прогнозных интервалах: 18:00–19:00.' in report.render(advice=True)
+   assert 'зонт' in report.render(advice=True)
+  finally: await window.close()
  finally: await engine.close()
 asyncio.run(main())
 '''
