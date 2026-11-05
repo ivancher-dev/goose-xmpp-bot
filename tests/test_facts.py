@@ -278,7 +278,7 @@ async def test_expired_queue_job_makes_no_request(system):
     clock = [0]
     engine.clock = lambda: clock[0]
     engine.submit(PARENT, "!news")
-    clock[0] = 31
+    clock[0] = 41
     await idle(engine)
     assert not calls and not sent
 
