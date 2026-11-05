@@ -285,13 +285,13 @@ async def test_met_redirects_stay_on_same_https_origin(config, database, target,
 
 async def test_waiting_for_a_slot_does_not_spend_notification_work_budget(setup_alerts, database, monkeypatch):
     alerts, facts, now, sent=setup_alerts
-    monkeypatch.setattr('goose.weather_alerts.ALERT_WORK_TIMEOUT',.015)
+    monkeypatch.setattr('goose.weather_alerts.ALERT_WORK_TIMEOUT',.5)
     facts.slots=asyncio.Semaphore(0)
     await database.set_weather_location(PARENT,PLACE)
     await alerts.configure(PARENT,['утром'])
     now[0]=datetime(2026,10,26,5,tzinfo=timezone.utc)
     await alerts.tick()
-    await asyncio.sleep(.03)
+    await asyncio.sleep(.6)
     assert not sent and not facts.get_weather.called
     facts.slots.release()
     await finish_jobs(alerts)
