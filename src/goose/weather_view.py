@@ -89,6 +89,7 @@ class Forecast:
     rain_expected: bool = False
     coverage: str | None = None
     wind_description: str | None = None
+    rain_windows: str | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,8 @@ def render_weather(place, day, zone, forecast, *, source, source_url, tomorrow=F
     wind = (f"до {decimal(forecast.wind_ms)} м/с." if forecast.wind_ms is not None
             else (forecast.wind_description or 'нет данных.'))
     lines.append('Ветер по прогнозу: ' + wind)
+    if forecast.rain_windows:
+        lines.append('Дождь в прогнозных интервалах: ' + forecast.rain_windows + '.')
     probability = (f"до {decimal(forecast.probability)}%." if forecast.probability is not None
                    else 'источник не сообщает.')
     lines.extend([f"Вероятность {forecast.precipitation} по интервалам: {probability}", "",
