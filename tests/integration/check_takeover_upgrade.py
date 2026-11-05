@@ -164,6 +164,21 @@ async def main():
    await alerts.tick();await asyncio.gather(*list(alerts.jobs.values()))
    assert len(sent)==2 and (await db.dialogue('pupil1@example.org'))['mode']=='manual'
   finally: await alerts.close();await facts.close()
+  os.environ['GOOSE_YANDEX_WEATHER_KEY']='fixture-weather-key'
+  pool_calls=[]
+  def pool_http(request):
+   pool_calls.append(request)
+   if request.url.host!='www.7timer.info': return httpx.Response(503)
+   return httpx.Response(200,json={'product':'civil','init':'2026110300','dataseries':[
+    {'timepoint':h,'temp2m':4,'wind10m':{'speed':3},'weather':'lightrainday','prec_type':'rain'}
+    for h in range(0,73,3)]})
+  pool=Facts(wc,db,prepare,transport=httpx.MockTransport(pool_http),now=lambda:weather_now[0])
+  try:
+   report=await pool.get_weather(place)
+   assert report.source=='7Timer! (GFS)' and report.day=='2026-11-03'
+   assert [r.url.host for r in pool_calls]==['api.open-meteo.com','api.weather.yandex.ru','wttr.in','api.met.no','www.7timer.info']
+   assert all(('X-Yandex-Weather-Key' in r.headers)==(r.url.host=='api.weather.yandex.ru') for r in pool_calls)
+  finally: await pool.close()
  finally: await engine.close()
 asyncio.run(main())
 '''

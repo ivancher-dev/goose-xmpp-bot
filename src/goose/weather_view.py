@@ -82,11 +82,13 @@ class Forecast:
     condition: str
     minimum: float
     maximum: float
-    probability: float
+    probability: float | None
     precipitation: str
     wind_ms: float | None = None
     condition_minutes: int | None = None
     rain_expected: bool = False
+    coverage: str | None = None
+    wind_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,17 +101,20 @@ class WeatherReport:
     source_url: str
     tomorrow: bool = False
     observation: Observation | None = None
+    issued_at: datetime | None = None
 
     def render(self, *, advice=False):
         report = render_weather(self.place, self.day, self.zone, self.forecast,
                                 source=self.source, source_url=self.source_url,
                                 tomorrow=self.tomorrow, observation=self.observation)
         tips = weather_advice(self.forecast) if advice else []
+        if self.issued_at is not None:
+            report += f"\nПрогноз обновлён: {self.issued_at.astimezone(self.zone):%d.%m.%Y %H:%M} (местное время)."
         return report + ("\n\n" + " ".join(tips) if tips else "")
 
 
 def weather_advice(forecast):
-    """Советы для суток прогноза; вероятность снега не превращается в дождь."""
+    """Советы для показанного периода; вероятность снега не превращается в дождь."""
     tips = []
     if forecast.rain_expected:
         tips.append("Возможен дождь — захвати зонт.")
@@ -145,14 +150,18 @@ def render_weather(place, day, zone, forecast, *, source, source_url, tomorrow=F
         if not observation.dated:
             lines.append("Дата наблюдения не указана источником.")
         lines.append("")
-    lines.append(f"На день: от {decimal(forecast.minimum, signed=True)} до {decimal(forecast.maximum, signed=True)} °C.")
+    period = forecast.coverage or 'На день'
+    lines.append(f"{period}: от {decimal(forecast.minimum, signed=True)} до {decimal(forecast.maximum, signed=True)} °C.")
     if forecast.condition_minutes is None:
         lines.append(f"Условия: {forecast.condition}.")
     else:
         minute = forecast.condition_minutes
         lines.append(f"В {minute // 60:02d}:{minute % 60:02d}: {forecast.condition}.")
-    lines.append("Ветер по прогнозу: " + (f"до {decimal(forecast.wind_ms)} м/с."
-                                        if forecast.wind_ms is not None else "нет данных."))
-    lines.extend([f"Вероятность {forecast.precipitation} по интервалам: до {decimal(forecast.probability)}%.", "",
+    wind = (f"до {decimal(forecast.wind_ms)} м/с." if forecast.wind_ms is not None
+            else (forecast.wind_description or 'нет данных.'))
+    lines.append('Ветер по прогнозу: ' + wind)
+    probability = (f"до {decimal(forecast.probability)}%." if forecast.probability is not None
+                   else 'источник не сообщает.')
+    lines.extend([f"Вероятность {forecast.precipitation} по интервалам: {probability}", "",
                   f"Источник: {source} — {source_url}"])
     return "\n".join(lines)

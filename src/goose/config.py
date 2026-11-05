@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from slixmpp import JID
 
+from .weather_sources import WEATHER_PROVIDERS
+
 
 class ConfigError(ValueError):
     pass
@@ -121,12 +123,13 @@ class WeatherConfig:
     enabled: bool = False
     provider: str = "open_meteo"
     fallback_providers: tuple[str, ...] | None = None
+    yandex_api_key_env: str = 'GOOSE_YANDEX_WEATHER_KEY'
 
     @property
     def providers(self):
         fallback = self.fallback_providers
         if fallback is None:
-            fallback = ("wttr",) if self.provider == "open_meteo" else ("open_meteo",)
+            fallback = tuple(p for p in WEATHER_PROVIDERS if p != self.provider)
         return (self.provider, *fallback)
 
 
@@ -317,17 +320,21 @@ def load_config(path: Path, *, source_root: Path | None = None) -> Config:
     memory_config = MemoryConfig(limited(memory, "recent_messages", 24, 100),
                                  limited(memory, "context_token_budget", 6000, 65536, 256),
                                  limited(memory, "retention_days", 30, 365))
-    weather = table(data, "weather", {"enabled", "provider", "fallback_providers"})
+    weather = table(data, "weather", {"enabled", "provider", "fallback_providers", "yandex_api_key_env"})
     weather_provider = text(weather, "provider", "open_meteo")
-    if weather_provider not in {"open_meteo", "wttr"}:
-        raise ConfigError("weather.provider: допустимы open_meteo и wttr.")
+    if weather_provider not in WEATHER_PROVIDERS:
+        raise ConfigError('weather.provider: допустимы ' + ', '.join(WEATHER_PROVIDERS) + '.')
     fallback = weather.get("fallback_providers")
     if "fallback_providers" in weather:
-        if (not isinstance(fallback, list) or len(fallback) > 1
-                or any(type(p) is not str or p not in {"open_meteo", "wttr"} or p == weather_provider for p in fallback)):
-            raise ConfigError("weather.fallback_providers: список резервных источников open_meteo/wttr без повторов основного.")
+        if (not isinstance(fallback, list) or len(fallback) > 4
+                or any(type(p) is not str or p not in WEATHER_PROVIDERS or p == weather_provider for p in fallback)
+                or len(set(fallback)) != len(fallback)):
+            raise ConfigError('weather.fallback_providers: до четырёх известных источников без повторов основного/резервных.')
         fallback = tuple(fallback)
-    weather_config = WeatherConfig(typed(weather, "enabled", bool, False), weather_provider, fallback)
+    weather_key_env = text(weather, 'yandex_api_key_env', 'GOOSE_YANDEX_WEATHER_KEY')
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', weather_key_env):
+        raise ConfigError('weather.yandex_api_key_env: нужно имя переменной окружения, не сам ключ.')
+    weather_config = WeatherConfig(typed(weather, "enabled", bool, False), weather_provider, fallback, weather_key_env)
     news = table(data, "news", {"enabled", "sources", "limit", "max_age_hours"})
     enabled_news = typed(news, "enabled", bool, False)
     sources = news.get("sources", {})

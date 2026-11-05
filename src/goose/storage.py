@@ -204,6 +204,22 @@ class Database:
             "SELECT value FROM weather_locations WHERE jid=?", (jid,)).fetchone())
         return json.loads(row[0]) if row else None
 
+    async def claim_yandex_weather_call(self, stamp):
+        """Консервативные 30 попыток за скользящие сутки, включая неудачные."""
+        def claim(db):
+            row = db.execute("SELECT value FROM metadata WHERE key='weather_yandex_attempts'").fetchone()
+            attempts = json.loads(row[0]) if row else []
+            if (not isinstance(attempts, list) or len(attempts) > 30
+                    or any(type(v) not in (int, float) or not 0 <= v < 10**12 for v in attempts)):
+                raise ValueError('Invalid weather quota state')
+            attempts = [v for v in attempts if v > stamp - 86400]
+            if len(attempts) >= 30:
+                return False
+            db.execute("INSERT OR REPLACE INTO metadata VALUES('weather_yandex_attempts',?)",
+                       (json.dumps([*attempts, stamp]),))
+            return True
+        return await self.call(claim)
+
     async def set_weather_location(self, jid, value, *, stamp=None, expected=...):
         def update(db):
             if expected is not ...:

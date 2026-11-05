@@ -9,8 +9,10 @@ import html
 import json
 import logging
 import math
+import os
 import re
 import time
+import sqlite3
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -21,14 +23,17 @@ import httpx
 from .config import bare_jid
 from . import __version__
 from .weather_view import Forecast, Observation, WWO_CONDITIONS, WeatherVoice, WeatherReport
+from .weather_sources import (MET_NO, SEVEN_TIMER, YANDEX, PROVIDER_HOSTS,
+                              met_no_report, seven_timer_report, yandex_report, yandex_query)
 
 log = logging.getLogger("goose")
 GEO = "https://geocoding-api.open-meteo.com/v1/"
 FORECAST = "https://api.open-meteo.com/v1/forecast"
 WTTR = "https://wttr.in/"
 MAX_BYTES = 524288
-WEATHER_SOURCE_TIMEOUT = 6
-WEATHER_TOTAL_TIMEOUT = 16
+WEATHER_SOURCE_TIMEOUT = 4
+WEATHER_TOTAL_TIMEOUT = 22
+FACTS_DEADLINE = 40
 WEATHER_HELP = ("Погода: !weather [город], !weather tomorrow [город]. "
                 "Свой город: !weather city <название> или #ID; просмотр: !weather city; "
                 "удаление: !weather city clear. Рассылка: !weather notify утром [08:00] вечером [18:00]; "
@@ -37,6 +42,11 @@ WEATHER_HELP = ("Погода: !weather [город], !weather tomorrow [гор�
 
 class FactsError(Exception):
     pass
+
+
+class WeatherSkipped(Exception):
+    def __init__(self, reason):
+        self.reason = reason
 
 
 def plain(value, limit=160):
@@ -336,7 +346,7 @@ class Facts:
         if len(state.pending) + bool(state.task) >= 4 or sum(len(s.pending) for s in self.states.values()) + len(self.tasks) >= 32:
             log.warning("facts_ignored reason=queue_full")
             return True
-        state.pending.append((request, self.clock() + 30, state.revision))
+        state.pending.append((request, self.clock() + FACTS_DEADLINE, state.revision))
         if state.task is None:
             state.task = asyncio.create_task(self._work(jid, state))
             self.tasks.add(state.task)
@@ -392,10 +402,11 @@ class Facts:
             if state.task is asyncio.current_task():
                 state.task = None
 
-    async def fetch(self, url, params=None):
+    async def fetch(self, url, params=None, *, method='GET', payload=None, headers=None,
+                    cache=True, met_cache=False, compression=False, _redirects=0):
         key = (url, tuple(sorted((params or {}).items())))
-        cached = self.cache.get(key)
-        if cached and self.clock() - cached[0] < 300:
+        cached = self.cache.get(key) if cache else None
+        if cached and self.clock() - cached[0] < cached[2]:
             self.cache.move_to_end(key)
             return cached[1]
         while self.attempts and self.clock() - self.attempts[0] >= 60:
@@ -405,25 +416,64 @@ class Facts:
         self.attempts.append(self.clock())
         if self.client is None:
             self.client = httpx.AsyncClient(transport=self.transport, timeout=10, follow_redirects=False,
-                                          trust_env=False, headers={"User-Agent": "goose-xmpp-bot/" + __version__,
+                                          trust_env=False, headers={"User-Agent": "goose-xmpp-bot/" + __version__
+                                                                    + ' (https://github.com/ivancher-dev/goose-xmpp-bot)',
                                                                     "Accept-Encoding": "identity"})
-        async with self.client.stream("GET", url, params=params) as response:
-            response.raise_for_status()
-            if response.headers.get("content-encoding", "identity").lower() != "identity":
-                raise ValueError
-            if int(response.headers.get("content-length", "0")) > MAX_BYTES:
-                raise ValueError
-            size, chunks = 0, []
-            async for chunk in response.aiter_bytes(chunk_size=8192):
-                size += len(chunk)
-                if size > MAX_BYTES:
+        request_headers = dict(headers or {})
+        if met_cache or compression:
+            request_headers['Accept-Encoding'] = 'gzip, deflate'
+        if met_cache:
+            if cached and cached[3]:
+                request_headers['If-Modified-Since'] = cached[3]
+        async with self.client.stream(method, url, params=params, json=payload, headers=request_headers) as response:
+            if met_cache and response.status_code in {301, 302, 303, 307, 308}:
+                target = urljoin(str(response.request.url), response.headers.get('Location', ''))
+                before, after = urlsplit(url), urlsplit(target)
+                if (_redirects >= 2 or after.scheme != 'https' or after.hostname != before.hostname
+                        or after.port not in (None, 443) or after.username or after.password
+                        or not response.headers.get('Location')):
+                    raise ValueError('Unsafe weather redirect')
+                result = await self.fetch(target, met_cache=True, _redirects=_redirects + 1)
+                target_entry = self.cache.get((target, ()))
+                if target_entry:
+                    self.cache[key] = target_entry
+                    self.cache.move_to_end(key)
+                    while len(self.cache) > 64:
+                        self.cache.popitem(last=False)
+                return result
+            if met_cache and response.status_code == 304 and cached:
+                result = cached[1]
+            else:
+                result = None
+            if result is None:
+                response.raise_for_status()
+                encoding = response.headers.get('content-encoding', 'identity').lower()
+                if encoding not in ({'identity', 'gzip', 'deflate'} if met_cache or compression else {'identity'}):
                     raise ValueError
-                chunks.append(chunk)
-        result = b"".join(chunks)
-        self.cache[key] = (self.clock(), result)
-        self.cache.move_to_end(key)
-        while len(self.cache) > 64:
-            self.cache.popitem(last=False)
+                if int(response.headers.get('content-length', '0')) > MAX_BYTES:
+                    raise ValueError
+                size, chunks = 0, []
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise ValueError
+                    chunks.append(chunk)
+                result = b''.join(chunks)
+            ttl, modified = 300, response.headers.get('Last-Modified')
+            if met_cache:
+                expires = response.headers.get('Expires')
+                if expires:
+                    ttl = max(0, min(86400, (parsedate_to_datetime(expires) - self.now()).total_seconds()))
+                match = re.search(r'(?:^|,)\s*max-age=([0-9]+)', response.headers.get('Cache-Control', ''))
+                if match:
+                    ttl = min(86400, int(match[1]))
+                if response.status_code == 304:
+                    modified = modified or cached[3]
+        if cache:
+            self.cache[key] = (self.clock(), result, ttl, modified)
+            self.cache.move_to_end(key)
+            while len(self.cache) > 64:
+                self.cache.popitem(last=False)
         return result
 
     async def geocode(self, query):
@@ -485,7 +535,7 @@ class Facts:
 
     async def get_weather(self, place, tomorrow=False):
         """Ограниченный пул независимых источников; ошибка не становится погодой."""
-        errors = (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, OverflowError, TimeoutError)
+        errors = (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError, IndexError, OverflowError, TimeoutError)
         providers = self.config.weather.providers
         # Недавний отказ меняет приоритет, но не лишает последнего шанса:
         # если здоровый источник тоже упал, пробуем весь оставшийся пул.
@@ -498,19 +548,54 @@ class Facts:
                             report = await self._weather_from(provider, place, tomorrow)
                         self.weather_failures.pop(provider, None)
                         return report
-                    except errors:
+                    except WeatherSkipped as exc:
+                        log.info('weather_source_skipped provider=%s reason=%s', provider, exc.reason)
+                    except errors as exc:
                         self.weather_failures[provider] = self.clock() + 120
                         # Неверный/устаревший JSON не должен оставаться в HTTP-кэше.
-                        host = "wttr.in" if provider == "wttr" else "api.open-meteo.com"
+                        host = PROVIDER_HOSTS[provider]
                         for key in list(self.cache):
                             if urlsplit(key[0]).hostname == host:
                                 self.cache.pop(key)
-                        log.warning("weather_source_failed provider=%s", provider)
+                        reason = ('timeout' if isinstance(exc, (TimeoutError, httpx.TimeoutException))
+                                  else 'http_status' if isinstance(exc, httpx.HTTPStatusError)
+                                  else 'network' if isinstance(exc, httpx.HTTPError) else 'data')
+                        status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 0
+                        log.warning('weather_source_failed provider=%s reason=%s status=%d', provider, reason, status)
         except TimeoutError:
             log.warning("weather_sources_failed reason=deadline")
         raise FactsError("Не удалось получить свежий прогноз из погодных источников. Попробуй позже.")
 
     async def _weather_from(self, provider, place, tomorrow):
+        if provider in {'met_no', 'seven_timer', 'yandex'}:
+            key = ''
+            if provider == 'yandex':
+                key = os.environ.get(self.config.weather.yandex_api_key_env, '')
+                if not key:
+                    raise WeatherSkipped('unconfigured')
+                if len(key) > 512 or any(ord(c) < 33 or ord(c) > 126 for c in key):
+                    raise WeatherSkipped('configuration')
+            if 'timezone' not in place:
+                metadata = await self.geocode(f"#{place['id']}")
+                place = {**place, 'timezone': metadata['timezone']}
+            if provider == 'met_no':
+                payload = await self.fetch(MET_NO, {'lat': f"{place['latitude']:.4f}",
+                                                   'lon': f"{place['longitude']:.4f}"}, met_cache=True)
+                return met_no_report(json.loads(payload), place, tomorrow, self.now())
+            if provider == 'seven_timer':
+                payload = await self.fetch(SEVEN_TIMER, {'lat': f"{place['latitude']:.4f}",
+                                                        'lon': f"{place['longitude']:.4f}",
+                                                        'product': 'civil', 'output': 'json', 'unit': 'metric'}, compression=True)
+                return seven_timer_report(json.loads(payload), place, tomorrow, self.now())
+            try:
+                allowed = await self.database.claim_yandex_weather_call(self.now().timestamp())
+            except (ValueError, OSError, sqlite3.Error):
+                raise WeatherSkipped('quota_storage') from None
+            if not allowed:
+                raise WeatherSkipped('quota')
+            payload = await self.fetch(YANDEX, method='POST', payload={'query': yandex_query(place)},
+                                       headers={'X-Yandex-Weather-Key': key}, cache=False, compression=True)
+            return yandex_report(json.loads(payload), place, tomorrow, self.now())
         if provider == "wttr":
             if "timezone" not in place:
                 # Совместимость с городами, сохранёнными 0.2.1 без timezone.

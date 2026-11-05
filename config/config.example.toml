@@ -56,9 +56,11 @@ retention_days = 30
 
 [weather]
 enabled = false
-provider = "open_meteo" # первый источник; можно выбрать "wttr"
-# Без этого поля второй сервис используется как резервный автоматически.
-# fallback_providers = ["wttr"] # для provider="open_meteo"; [] выключает резерв
+provider = "open_meteo" # также yandex, wttr, met_no, seven_timer
+# Без этого поля резерв автоматически содержит остальные четыре источника.
+# fallback_providers = ["yandex", "wttr", "met_no", "seven_timer"] # [] выключает резерв
+# Только имя переменной. Сам ключ — в защищённом goose.env; без ключа Яндекс пропускается.
+# yandex_api_key_env = "GOOSE_YANDEX_WEATHER_KEY"
 # Свой город задаётся в чате командой !weather city <название>.
 # Рассылка: !weather notify утром днём вечером; 08:00 / 13:00 / 18:00 по городу.
 

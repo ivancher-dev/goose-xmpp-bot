@@ -76,7 +76,7 @@ async def test_recent_failure_only_changes_priority_and_does_not_remove_fallback
         if host == 'api.open-meteo.com':
             return httpx.Response(200, json=forecast()) if recovered[0] else httpx.Response(503)
         return httpx.Response(503) if recovered[0] else httpx.Response(200, json=payload())
-    engine = Facts(replace(config, weather=WeatherConfig(True)), database, None,
+    engine = Facts(replace(config, weather=WeatherConfig(True, fallback_providers=('wttr',))), database, None,
                    transport=httpx.MockTransport(route), now=lambda: NOW)
     try:
         assert (await engine.get_weather(PLACE)).source == 'wttr.in'

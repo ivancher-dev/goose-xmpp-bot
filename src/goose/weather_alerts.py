@@ -18,6 +18,7 @@ PERIODS = {'утром': ('08:00', 'Доброе утро!'),
 ALIASES = {'утро': 'утром', 'morning': 'утром', 'день': 'днём', 'днем': 'днём',
            'day': 'днём', 'вечер': 'вечером', 'evening': 'вечером'}
 WINDOW = 600
+ALERT_WORK_TIMEOUT = 35
 HELP = ('Рассылка погоды: !weather notify утром [08:00] днём [13:00] вечером [18:00]. '
         'Выбери от одного до трёх уведомлений; команда заменяет весь набор. '
         'Можно указать только время: !weather notify 08:30 18:15. '
@@ -168,29 +169,30 @@ class WeatherAlerts:
                 def valid():
                     return (not self.closing and self.ready()
                             and 0 <= self.now().timestamp() - stamp < WINDOW)
-                async with asyncio.timeout(25):
+                async with asyncio.timeout(max(0, stamp + WINDOW - self.now().timestamp())):
                     async with self.facts.slots:
-                        if not valid():
-                            continue
-                        claimed = await self.database.claim_weather_delivery(
-                            jid, period, day, subscription['revision'], self.now().timestamp())
-                        if not claimed:
-                            continue
-                        try:
-                            report = await self.facts.get_weather(place)
-                            # Полночь могла наступить во время HTTP: сводка относится к своему слоту.
-                            if report.day != day:
+                        async with asyncio.timeout(ALERT_WORK_TIMEOUT):
+                            if not valid():
                                 continue
-                            body = report.render(advice=True)
-                        except FactsError:
-                            body = 'Сейчас не удалось получить свежий прогноз. Спросить позже: !weather.'
-                        if not valid():
-                            continue
-                        send = await self.prepare_reply(jid, PERIODS[period][1] + '\n\n' + body)
-                        current = await self.database.weather_subscription(jid)
-                        if (send and valid() and current and current['revision'] == subscription['revision']):
-                            result = send()
-                            log.info('weather_alert_attempt sent=%s', result is not False)
+                            claimed = await self.database.claim_weather_delivery(
+                                jid, period, day, subscription['revision'], self.now().timestamp())
+                            if not claimed:
+                                continue
+                            try:
+                                report = await self.facts.get_weather(place)
+                                # Полночь могла наступить во время HTTP: сводка относится к своему слоту.
+                                if report.day != day:
+                                    continue
+                                body = report.render(advice=True)
+                            except FactsError:
+                                body = 'Сейчас не удалось получить свежий прогноз. Спросить позже: !weather.'
+                            if not valid():
+                                continue
+                            send = await self.prepare_reply(jid, PERIODS[period][1] + '\n\n' + body)
+                            current = await self.database.weather_subscription(jid)
+                            if (send and valid() and current and current['revision'] == subscription['revision']):
+                                result = send()
+                                log.info('weather_alert_attempt sent=%s', result is not False)
         except asyncio.CancelledError:
             raise
         except Exception:
